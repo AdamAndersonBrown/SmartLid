@@ -7,4 +7,6 @@ sdkconfig.old
 *.bin
 *.elf
 *.map
+*.tflite
+training_data/
 "@ > .gitignore
