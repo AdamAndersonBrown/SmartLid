@@ -19,6 +19,7 @@ void display_manager_draw_qr(const uint8_t *qrcode, int size);
 #define COLOR_ORANGE 0xFD20
 
 void core2_get_battery_state(int *percent, bool *is_charging);
+void display_manager_draw_wifi(int rssi, bool connected);
 void display_manager_draw_battery(int percent, bool is_charging);
 void display_manager_draw_reset_progress(int percent, bool warning);
 void display_manager_draw_tag(int tag);

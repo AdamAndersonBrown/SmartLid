@@ -155,8 +155,9 @@ void core2_get_battery_state(int *percent, bool *is_charging) {
 
 void display_manager_draw_battery(int percent, bool is_charging) {
     if (!panel_handle) return;
+    static uint16_t bat_buf[35 * 15]; // Static memory prevents DMA tearing
     int fill_w = (percent * 26) / 100;
-    uint16_t *buf = malloc(35 * 15 * sizeof(uint16_t));
+    
     for(int y=0; y<15; y++) {
         for(int x=0; x<35; x++) {
             uint16_t color = last_bg_color;
@@ -164,7 +165,6 @@ void display_manager_draw_battery(int percent, bool is_charging) {
                 if (x == 0 || x == 29 || y == 0 || y == 11) color = COLOR_WHITE;
                 else if (x > 1 && x < 2 + fill_w && y > 1 && y < 10) {
                     color = (percent > 20) ? COLOR_WHITE : COLOR_RED;
-                    // Draw charging '+' symbol inside the battery
                     if (is_charging && x >= 13 && x <= 17 && y >= 4 && y <= 8) {
                         if (x == 15 || y == 6) color = COLOR_BLACK; 
                     }
@@ -172,62 +172,88 @@ void display_manager_draw_battery(int percent, bool is_charging) {
             } else if (x >= 30 && x < 33 && y >= 3 && y <= 8) {
                 color = COLOR_WHITE;
             }
-            buf[y * 35 + x] = color;
+            bat_buf[y * 35 + x] = color;
         }
     }
-    esp_lcd_panel_draw_bitmap(panel_handle, 280, 5, 315, 20, buf);
-    free(buf);
+    esp_lcd_panel_draw_bitmap(panel_handle, 280, 5, 315, 20, bat_buf);
 }
 
 void display_manager_draw_reset_progress(int percent, bool warning) {
     if (!panel_handle) return;
     
-    // 1. Draw the progress bar at the bottom
-    uint16_t *buf = malloc(320 * 10 * sizeof(uint16_t));
-    if (buf) {
-        int fill_w = (percent * 320) / 100;
-        for(int y=0; y<10; y++) {
-            for(int x=0; x<320; x++) {
-                buf[y * 320 + x] = (x < fill_w) ? COLOR_RED : last_bg_color;
-            }
+    static uint16_t prog_buf[320 * 10];
+    int fill_w = (percent * 320) / 100;
+    for(int y=0; y<10; y++) {
+        for(int x=0; x<320; x++) {
+            prog_buf[y * 320 + x] = (x < fill_w) ? COLOR_RED : last_bg_color;
         }
-        esp_lcd_panel_draw_bitmap(panel_handle, 0, 230, 320, 240, buf);
-        free(buf);
     }
+    esp_lcd_panel_draw_bitmap(panel_handle, 0, 230, 320, 240, prog_buf);
 
-    // 2. Draw or clear the central warning box
-    uint16_t *warn_buf = malloc(100 * 100 * sizeof(uint16_t));
-    if (warn_buf) {
-        if (warning) {
-            for(int i=0; i<100*100; i++) warn_buf[i] = COLOR_RED;
-            esp_lcd_panel_draw_bitmap(panel_handle, 110, 70, 210, 170, warn_buf);
-        } else if (percent == 0) {
-            // Only clear it if the reset is fully aborted to prevent flickering
-            for(int i=0; i<100*100; i++) warn_buf[i] = last_bg_color;
-            esp_lcd_panel_draw_bitmap(panel_handle, 110, 70, 210, 170, warn_buf);
-        }
-        free(warn_buf);
+    static uint16_t warn_buf[100 * 100];
+    if (warning) {
+        for(int i=0; i<100*100; i++) warn_buf[i] = COLOR_RED;
+        esp_lcd_panel_draw_bitmap(panel_handle, 110, 70, 210, 170, warn_buf);
+    } else if (percent == 0) {
+        for(int i=0; i<100*100; i++) warn_buf[i] = last_bg_color;
+        esp_lcd_panel_draw_bitmap(panel_handle, 110, 70, 210, 170, warn_buf);
     }
 }
 
 void display_manager_draw_tag(int tag) {
     if (!panel_handle) return;
-    uint16_t *buf = malloc(60 * 60 * sizeof(uint16_t));
-    if (!buf) return;
-
+    
+    static uint16_t b_buf[60 * 60];
+    static uint16_t c_buf[60 * 60];
+    
     int b_x = 130, c_x = 230, y_pos = 160;
     uint16_t color_b = (tag == 1) ? COLOR_YELLOW : last_bg_color;
     uint16_t color_c = (tag == 2) ? COLOR_ORANGE : last_bg_color;
 
-    // Paint Tag 1 (Button B) area
-    for(int i=0; i<60*60; i++) buf[i] = color_b;
-    esp_lcd_panel_draw_bitmap(panel_handle, b_x, y_pos, b_x + 60, y_pos + 60, buf);
+    for(int i=0; i<60*60; i++) b_buf[i] = color_b;
+    esp_lcd_panel_draw_bitmap(panel_handle, b_x, y_pos, b_x + 60, y_pos + 60, b_buf);
 
-    // Paint Tag 2 (Button C) area
-    for(int i=0; i<60*60; i++) buf[i] = color_c;
-    esp_lcd_panel_draw_bitmap(panel_handle, c_x, y_pos, c_x + 60, y_pos + 60, buf);
-
-    free(buf);
+    for(int i=0; i<60*60; i++) c_buf[i] = color_c;
+    esp_lcd_panel_draw_bitmap(panel_handle, c_x, y_pos, c_x + 60, y_pos + 60, c_buf);
 }
 
+void display_manager_draw_wifi(int rssi, bool connected) {
+    if (!panel_handle) return;
+    static uint16_t wifi_buf[30 * 25]; // 30x25 pixel static block
+    
+    for(int i=0; i<30*25; i++) wifi_buf[i] = last_bg_color;
 
+    if (connected) {
+        int bars = 0;
+        // Standard RSSI to Bar mapping
+        if (rssi > -60) bars = 4;
+        else if (rssi > -70) bars = 3;
+        else if (rssi > -80) bars = 2;
+        else if (rssi > -90) bars = 1;
+
+        // Draw 4 vertical bars of increasing height
+        for (int b = 0; b < 4; b++) {
+            uint16_t color = (b < bars) ? COLOR_WHITE : 0x8410; // Grey if inactive
+            int bx = 2 + (b * 6);  // X offset
+            int bh = 6 + (b * 4);  // Bar height
+            int by = 22 - bh;      // Y offset (anchored to bottom)
+            
+            for (int x = bx; x < bx + 4; x++) {
+                for (int y = by; y < 22; y++) {
+                    wifi_buf[y * 30 + x] = color;
+                }
+            }
+        }
+    } else {
+        // Draw a thick Red X if disconnected
+        for(int i=5; i<20; i++) {
+            for(int w=0; w<3; w++) {
+                wifi_buf[(i) * 30 + (i + w)] = COLOR_RED;
+                wifi_buf[(i) * 30 + (24 - i + w)] = COLOR_RED;
+            }
+        }
+    }
+    
+    // Draw in the top-left corner
+    esp_lcd_panel_draw_bitmap(panel_handle, 5, 5, 35, 30, wifi_buf);
+}

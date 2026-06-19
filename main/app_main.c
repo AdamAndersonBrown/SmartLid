@@ -1,3 +1,4 @@
+#include "esp_sntp.h"
 #include "esp_wifi.h"
 extern void wifi_prov_print_qr(const char *name, const char *username, const char *pop, const char *transport);
 #include <stdio.h>
@@ -102,6 +103,14 @@ void app_main(void) {
     // Only start the telemetry task on a clean, connected boot
     start_imu_telemetry_task();
 
+        // Initialize Real-Time Clock via SNTP
+    ESP_LOGI(TAG, "Initializing SNTP for real-time syncing...");
+    esp_sntp_setoperatingmode(SNTP_OPMODE_POLL);
+    esp_sntp_setservername(0, "pool.ntp.org");
+    esp_sntp_init();
+    setenv("TZ", "PST8PDT", 1); // Pacific Time
+    tzset();
+    
     touch_manager_init();
 
     while(1) {
@@ -132,6 +141,21 @@ void app_main(void) {
             display_manager_draw_battery(batt, charging);
             last_batt = batt;
             last_charge = charging;
+        }
+
+        // --- WIFI RSSI UPDATE LOGIC ---
+        wifi_ap_record_t ap_info;
+        bool wifi_conn = (esp_wifi_sta_get_ap_info(&ap_info) == ESP_OK);
+        int current_rssi = wifi_conn ? ap_info.rssi : 0;
+        
+        static int last_rssi = 1; // Force initial draw
+        static bool last_conn = false;
+        
+        // Update the UI if the signal strength changes by more than 2 dBm or connection state flips
+        if (abs(current_rssi - last_rssi) > 2 || wifi_conn != last_conn) {
+            display_manager_draw_wifi(current_rssi, wifi_conn);
+            last_rssi = current_rssi;
+            last_conn = wifi_conn;
         }
     }
 }
