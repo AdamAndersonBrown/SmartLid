@@ -6,6 +6,8 @@
 #include "driver/i2c.h"
 #include "esp_log.h"
 #include "common_defs.h"
+
+volatile int active_event_tag = 0;
 #include "display_manager.h"
 
 static const char *TAG = "TOUCH";
@@ -13,7 +15,9 @@ static const char *TAG = "TOUCH";
 #define RESET_TIME_MS 7000
 #define WARN_TIME_MS  5000
 
-static void touch_task(void *pvParameters) {
+
+
+void touch_task(void *pvParameters) {
     uint8_t data[5];
     int reset_held_time = 0;
     int miss_count = 0;

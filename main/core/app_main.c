@@ -17,7 +17,6 @@ extern void wifi_prov_print_qr(const char *name, const char *username, const cha
 
 #include "common_defs.h"
 
-volatile int active_event_tag = 0;
 #include "display_manager.h"
 #include "touch_manager.h"
 #include "wifi_prov_handler.h"

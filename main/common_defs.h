@@ -1,36 +1,43 @@
 #ifndef COMMON_DEFS_H
 #define COMMON_DEFS_H
 
+// --- ML & Telemetry Parameters ---
+#define WINDOW_SIZE 20
+#define NUM_FEATURES 6
+#define NORMALIZATION_FACTOR 32768.0f
+#define POLLING_RATE_MS 50
+
+// --- Inference Engine Parameters ---
+#define TRIGGER_COOLDOWN_MS 3000
+#define CONFIDENCE_THRESHOLD 0.85f
+#define TENSOR_ARENA_SIZE 32768
+
+
 #include "freertos/FreeRTOS.h"
 #include "freertos/event_groups.h"
-#include "error_manager.h"
 
-#define APP_TAG "M5_CORE2"
-
-extern EventGroupHandle_t wifi_event_group;
+// --- Global Wi-Fi & Provisioning Event Bits ---
+#ifndef WIFI_CONNECTED_BIT
 #define WIFI_CONNECTED_BIT BIT0
-#define WIFI_FAIL_BIT BIT1
-#define WIFI_PROV_DONE_BIT BIT2
-#define SHUTDOWN_REQUEST_BIT BIT4
-#define FACTORY_RESET_BIT BIT5
+#define WIFI_PROV_DONE_BIT BIT1
+#define FACTORY_RESET_BIT  BIT2
+#define WIFI_FAIL_BIT      BIT3
+#endif
 
-// Minimal LED States to satisfy wifi_prov_handler
+// --- Shared State Variables ---
+extern EventGroupHandle_t wifi_event_group;
+extern volatile int active_event_tag;
+
+// --- Hardware Types ---
 typedef enum {
-    LED_STATE_OFF = 0,
-    LED_STATE_INITIALIZING,
+    LED_STATE_IDLE = 0,
+    LED_STATE_WIFI_CONNECTING,
+    LED_STATE_WIFI_CONNECTED,
+    LED_STATE_PROV_STARTED,
+    LED_STATE_ERROR,
     LED_STATE_PROVISIONING_ACTIVE,
     LED_STATE_PROVISIONING_CONNECTING,
-    LED_STATE_WIFI_CONNECTING,
-    LED_STATE_WIFI_CONNECTED_IDLE,
-    LED_STATE_TIME_SYNCING,
-    LED_STATE_AUDIO_CONNECTING,
-    LED_STATE_AUDIO_STREAMING,
-    LED_STATE_OTA_CHECKING,
-    LED_STATE_BUTTON_HELD,
-    LED_STATE_ERROR,
-    LED_STATE_REBOOTING
+    LED_STATE_WIFI_CONNECTED_IDLE
 } led_state_t;
 
 #endif // COMMON_DEFS_H
-
-extern volatile int active_event_tag;
