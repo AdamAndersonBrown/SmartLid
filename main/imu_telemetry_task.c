@@ -1,3 +1,4 @@
+#include "inference_manager.h"
 #include <sys/time.h>
 #include "esp_timer.h"
 #include "common_defs.h"
@@ -70,6 +71,8 @@ static void imu_telemetry_task(void *pvParameters) {
             int16_t gyro_x = (raw_data[8] << 8) | raw_data[9];
             int16_t gyro_y = (raw_data[10] << 8) | raw_data[11];
             int16_t gyro_z = (raw_data[12] << 8) | raw_data[13];
+            inference_push_data(acc_x, acc_y, acc_z, gyro_x, gyro_y, gyro_z);
+            inference_run();
 
             struct timeval tv;
             gettimeofday(&tv, NULL);

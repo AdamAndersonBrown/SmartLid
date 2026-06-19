@@ -1,3 +1,4 @@
 dependencies:
-  espressif/qrcode: '*'
-  espressif/esp_lcd_ili9341: '*'
+  espressif/esp_lcd_ili9341: "*"
+  espressif/qrcode: "*"
+  espressif/esp-tflite-micro: "*"

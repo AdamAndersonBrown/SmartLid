@@ -259,3 +259,22 @@ void display_manager_draw_wifi(int rssi, bool connected) {
     // Draw in the top-left corner
     esp_lcd_panel_draw_bitmap(panel_handle, 5, 5, 35, 30, wifi_buf);
 }
+
+void display_manager_set_alert(int class_id) {
+    if (!panel_handle) return;
+    static int last_class = -1;
+    if (class_id == last_class) return;
+    last_class = class_id;
+
+    // Green for Open (2), Black for Idle (0) or Rattle (1) to keep it stealthy
+    uint16_t color = (class_id == 2) ? COLOR_GREEN : 0x0000;
+
+    // Draw in horizontal bands to save ESP32 memory overhead
+    static uint16_t row_buf[320 * 10];
+    for (int i = 0; i < 320 * 10; i++) row_buf[i] = color;
+    
+    // Override the middle of the screen, leaving the Battery/Wifi UI intact
+    for (int y = 30; y < 210; y += 10) {
+        esp_lcd_panel_draw_bitmap(panel_handle, 0, y, 320, y + 10, row_buf);
+    }
+}

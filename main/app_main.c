@@ -1,3 +1,4 @@
+#include "inference_manager.h"
 #include "speaker_manager.h"
 #include "esp_sntp.h"
 #include "esp_wifi.h"
@@ -113,6 +114,7 @@ void app_main(void) {
     tzset();
     
     speaker_manager_init();
+    inference_manager_init();
     touch_manager_init();
 
     while(1) {
