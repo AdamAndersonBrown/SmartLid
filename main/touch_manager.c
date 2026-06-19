@@ -5,70 +5,84 @@
 #include "driver/i2c.h"
 #include "esp_log.h"
 #include "common_defs.h"
-#include "app_main.h"
+#include "display_manager.h"
 
 static const char *TAG = "TOUCH";
 #define FT6336U_ADDR 0x38
-#define TOUCH_TASK_DELAY_MS 50
-#define RESET_HOLD_TIME_MS 3000
+#define RESET_TIME_MS 7000
+#define WARN_TIME_MS  5000
 
 static void touch_task(void *pvParameters) {
     uint8_t data[5];
-    int held_time = 0;
-    bool is_pressed = false;
-    int miss_count = 0; // Jitter buffer
+    int reset_held_time = 0;
+    int miss_count = 0;
+    int last_tag = -1;
 
     while(1) {
         uint8_t reg = 0x02; 
         esp_err_t err = i2c_master_write_read_device(I2C_NUM_0, FT6336U_ADDR, &reg, 1, data, 5, pdMS_TO_TICKS(10));
         
+        bool is_touched = false;
         if (err == ESP_OK) {
             uint8_t touch_points = data[0] & 0x0F;
-            
-            if (touch_points > 0 && touch_points <= 2) { // Valid touch detected
+            if (touch_points > 0 && touch_points <= 2) {
                 uint16_t x = ((data[1] & 0x0F) << 8) | data[2];
                 uint16_t y = ((data[3] & 0x0F) << 8) | data[4];
-
-                // Print the raw coordinates so we can see what the hardware is doing!
-                ESP_LOGI(TAG, "Touch Registered -> X: %d, Y: %d", x, y);
-
-                // Expanded bounding box for Button A (Bottom Left)
-                // We check both standard and inverted coordinate maps just in case
-                if ((x < 160 && y > 200) || (y < 160 && x > 200)) {
-                    if (!is_pressed) {
-                        ESP_LOGW(TAG, "Button A touched! Hold for 3 seconds to Factory Reset.");
-                    }
-                    is_pressed = true;
+                
+                if (y > 240) {
+                    is_touched = true;
                     miss_count = 0;
-                    held_time += TOUCH_TASK_DELAY_MS;
-
-                    if (held_time >= RESET_HOLD_TIME_MS) {
-                        ESP_LOGE(TAG, "!!! FACTORY RESET TRIGGERED BY TOUCH !!!");
-                        xEventGroupSetBits(wifi_event_group, FACTORY_RESET_BIT);
-                        held_time = 0; 
-                        vTaskDelay(pdMS_TO_TICKS(5000));
-                    }
-                } else {
-                    // Finger slid off the button
-                    is_pressed = false;
-                    held_time = 0;
-                }
-            } else {
-                // 0 touches reported. Use the Jitter Buffer to allow a grace period.
-                if (is_pressed) {
-                    miss_count++;
-                    if (miss_count > 5) { // ~250ms grace period expired
-                        is_pressed = false;
-                        held_time = 0;
+                    
+                    if (x < 100) {
+                        // Button A: Factory Reset
+                        active_event_tag = 0;
+                        reset_held_time += 50;
+                        
+                        bool warn = (reset_held_time >= WARN_TIME_MS);
+                        display_manager_draw_reset_progress((reset_held_time * 100) / RESET_TIME_MS, warn);
+                        
+                        if (reset_held_time >= RESET_TIME_MS) {
+                            ESP_LOGE(TAG, "!!! FACTORY RESET TRIGGERED BY TOUCH !!!");
+                            xEventGroupSetBits(wifi_event_group, FACTORY_RESET_BIT);
+                            reset_held_time = 0; 
+                            vTaskDelay(pdMS_TO_TICKS(5000));
+                        }
+                    } else if (x >= 100 && x < 220) {
+                        // Button B: ML Event Tag 1
+                        active_event_tag = 1;
+                        if (reset_held_time > 0) { reset_held_time = 0; display_manager_draw_reset_progress(0, false); }
+                    } else if (x >= 220) {
+                        // Button C: ML Event Tag 2
+                        active_event_tag = 2;
+                        if (reset_held_time > 0) { reset_held_time = 0; display_manager_draw_reset_progress(0, false); }
                     }
                 }
             }
         }
-        vTaskDelay(pdMS_TO_TICKS(TOUCH_TASK_DELAY_MS));
+        
+        if (!is_touched) {
+            miss_count++;
+            if (miss_count > 5) { // 250ms debounce
+                active_event_tag = 0;
+                if (reset_held_time > 0) {
+                    // Abort reset, clear progress bar and warning box
+                    reset_held_time = 0;
+                    display_manager_draw_reset_progress(0, false);
+                }
+            }
+        }
+
+        // Only command the SPI bus to draw if the tag actually changed
+        if (active_event_tag != last_tag) {
+            display_manager_draw_tag(active_event_tag);
+            last_tag = active_event_tag;
+        }
+
+        vTaskDelay(pdMS_TO_TICKS(50));
     }
 }
 
 void touch_manager_init(void) {
     xTaskCreate(touch_task, "touch_task", 4096, NULL, 5, NULL);
-    ESP_LOGI(TAG, "Capacitive touch driver initialized.");
+    ESP_LOGI(TAG, "Capacitive Touch UI and Tagger initialized.");
 }

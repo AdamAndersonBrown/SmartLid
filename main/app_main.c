@@ -13,6 +13,8 @@ extern void wifi_prov_print_qr(const char *name, const char *username, const cha
 #include "wifi_provisioning/scheme_softap.h"
 
 #include "common_defs.h"
+
+volatile int active_event_tag = 0;
 #include "display_manager.h"
 #include "touch_manager.h"
 #include "wifi_prov_handler.h"
@@ -118,6 +120,18 @@ void app_main(void) {
             ESP_LOGW(TAG, "NVS Wiped. Rebooting to Provisioning Mode...");
             vTaskDelay(pdMS_TO_TICKS(500));
             esp_restart();
+        }
+
+        // --- BATTERY UPDATE LOGIC ---
+        static int last_batt = -1;
+        static bool last_charge = false;
+        int batt = 0;
+        bool charging = false;
+        core2_get_battery_state(&batt, &charging);
+        if (batt != last_batt || charging != last_charge) {
+            display_manager_draw_battery(batt, charging);
+            last_batt = batt;
+            last_charge = charging;
         }
     }
 }

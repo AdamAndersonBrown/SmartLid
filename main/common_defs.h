@@ -32,3 +32,5 @@ typedef enum {
 } led_state_t;
 
 #endif // COMMON_DEFS_H
+
+extern volatile int active_event_tag;

@@ -1,3 +1,5 @@
+#include "esp_timer.h"
+#include "common_defs.h"
 #include <stdio.h>
 #include <string.h>
 #include "freertos/FreeRTOS.h"
@@ -68,9 +70,8 @@ static void imu_telemetry_task(void *pvParameters) {
             int16_t gyro_y = (raw_data[10] << 8) | raw_data[11];
             int16_t gyro_z = (raw_data[12] << 8) | raw_data[13];
 
-            int len = snprintf(payload, sizeof(payload), 
-                               "{\"ax\":%d,\"ay\":%d,\"az\":%d,\"gx\":%d,\"gy\":%d,\"gz\":%d}", 
-                               acc_x, acc_y, acc_z, gyro_x, gyro_y, gyro_z);
+            int64_t ts = esp_timer_get_time();
+            int len = snprintf(payload, sizeof(payload), "{\"ts\":%lld,\"ax\":%d,\"ay\":%d,\"az\":%d,\"gx\":%d,\"gy\":%d,\"gz\":%d,\"tag\":%d}", ts, acc_x, acc_y, acc_z, gyro_x, gyro_y, gyro_z, active_event_tag);
 
             int err = sendto(sock, payload, len, 0, (struct sockaddr *)&dest_addr, sizeof(dest_addr));
             static int log_cnt = 0;
