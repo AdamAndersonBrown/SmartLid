@@ -1,0 +1,10 @@
+"@
+build/
+managed_components/
+dependencies.lock
+sdkconfig.old
+.vscode/
+*.bin
+*.elf
+*.map
+"@ > .gitignore
