@@ -44,9 +44,11 @@ void core2_power_init(void) {
         {0x27, 0xCC}, // DCDC3 (LCD Backlight) 
         {0x28, 0xCC}, // LDO2 (LCD Logic) 3.3V
         {0x12, 0x47}, // Enable DCDC1, DCDC3, LDO2, EXTEN
-        {0x82, 0xFF}  // Enable Battery ADC
+        {0x82, 0xFF}, // Enable Battery ADC
+        {0x93, 0x00}, // AXP192 REG 0x93: GPIO2 Control = Output (NOT 0x9A!)
+        {0x94, 0x04}  // AXP192 REG 0x94: GPIO2 High (Speaker Amp Enable)
     };
-    for(int i=0; i<4; i++) {
+    for(int i=0; i<6; i++) {
         i2c_master_write_to_device(I2C_NUM_0, 0x34, axp_cmd[i], 2, pdMS_TO_TICKS(100));
     }
     vTaskDelay(pdMS_TO_TICKS(100)); // Allow power to stabilize

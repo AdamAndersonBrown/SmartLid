@@ -1,3 +1,4 @@
+#include "speaker_manager.h"
 #include "esp_sntp.h"
 #include "esp_wifi.h"
 extern void wifi_prov_print_qr(const char *name, const char *username, const char *pop, const char *transport);
@@ -111,6 +112,7 @@ void app_main(void) {
     setenv("TZ", "PST8PDT", 1); // Pacific Time
     tzset();
     
+    speaker_manager_init();
     touch_manager_init();
 
     while(1) {

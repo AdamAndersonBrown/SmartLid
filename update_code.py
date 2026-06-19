@@ -1,104 +1,55 @@
 # update_code.py
 import os
+import re
 
-disp_h = "main/display_manager.h"
+touch_c = "main/touch_manager.c"
 disp_c = "main/display_manager.c"
-main_c = "main/app_main.c"
 
-print("Injecting Real-Time Wi-Fi RSSI Display...")
+print("Fixing impossible logic and rogue AXP192 hardware registers...")
 
-# 1. Update Display Manager Header
-if os.path.exists(disp_h):
-    with open(disp_h, "r") as f:
+# 1. Fix the impossible logic in the Touch Manager
+if os.path.exists(touch_c):
+    with open(touch_c, "r") as f:
         content = f.read()
+        
+    target_touch = """// Button B: ML Event Tag 1
+                        active_event_tag = 1;
+                        if (reset_held_time > 0) { reset_held_time = 0; display_manager_draw_reset_progress(0, false); }
+                        if (!is_touched) speaker_play_rattle(); // Play sound on initial press"""
+                        
+    fix_touch = """// Button B: ML Event Tag 1
+                        if (active_event_tag != 1) { speaker_play_rattle(); } // Fire exactly once on press
+                        active_event_tag = 1;
+                        if (reset_held_time > 0) { reset_held_time = 0; display_manager_draw_reset_progress(0, false); }"""
     
-    if "display_manager_draw_wifi" not in content:
-        content = content.replace('void display_manager_draw_battery', 'void display_manager_draw_wifi(int rssi, bool connected);\nvoid display_manager_draw_battery')
-        with open(disp_h, "w") as f:
+    if "active_event_tag != 1" not in content:
+        content = content.replace(target_touch, fix_touch)
+        with open(touch_c, "w") as f:
             f.write(content)
-        print("-> display_manager.h patched.")
+        print("-> touch_manager.c patched (Sound logic fixed).")
 
-# 2. Add Wi-Fi Rendering to Display Manager Source
+# 2. Fix the rogue AXP192 power register causing visual artifacts
 if os.path.exists(disp_c):
     with open(disp_c, "r") as f:
         content = f.read()
 
-    new_wifi_func = """
-void display_manager_draw_wifi(int rssi, bool connected) {
-    if (!panel_handle) return;
-    static uint16_t wifi_buf[30 * 25]; // 30x25 pixel static block
+    # Use regex to securely replace the entire AXP array to guarantee it is correct
+    pattern_axp = r'uint8_t axp_cmd\[\]\[2\] = \{[\s\S]*?\};\n\s*for\(int i=0; i<\d; i\+\+\) \{'
     
-    for(int i=0; i<30*25; i++) wifi_buf[i] = last_bg_color;
+    fix_axp = """uint8_t axp_cmd[][2] = {
+        {0x27, 0xCC}, // DCDC3 (LCD Backlight) 
+        {0x28, 0xCC}, // LDO2 (LCD Logic) 3.3V
+        {0x12, 0x47}, // Enable DCDC1, DCDC3, LDO2, EXTEN
+        {0x82, 0xFF}, // Enable Battery ADC
+        {0x93, 0x00}, // AXP192 REG 0x93: GPIO2 Control = Output (NOT 0x9A!)
+        {0x94, 0x04}  // AXP192 REG 0x94: GPIO2 High (Speaker Amp Enable)
+    };
+    for(int i=0; i<6; i++) {"""
 
-    if (connected) {
-        int bars = 0;
-        // Standard RSSI to Bar mapping
-        if (rssi > -60) bars = 4;
-        else if (rssi > -70) bars = 3;
-        else if (rssi > -80) bars = 2;
-        else if (rssi > -90) bars = 1;
-
-        // Draw 4 vertical bars of increasing height
-        for (int b = 0; b < 4; b++) {
-            uint16_t color = (b < bars) ? COLOR_WHITE : 0x8410; // Grey if inactive
-            int bx = 2 + (b * 6);  // X offset
-            int bh = 6 + (b * 4);  // Bar height
-            int by = 22 - bh;      // Y offset (anchored to bottom)
-            
-            for (int x = bx; x < bx + 4; x++) {
-                for (int y = by; y < 22; y++) {
-                    wifi_buf[y * 30 + x] = color;
-                }
-            }
-        }
-    } else {
-        // Draw a thick Red X if disconnected
-        for(int i=5; i<20; i++) {
-            for(int w=0; w<3; w++) {
-                wifi_buf[(i) * 30 + (i + w)] = COLOR_RED;
-                wifi_buf[(i) * 30 + (24 - i + w)] = COLOR_RED;
-            }
-        }
-    }
-    
-    // Draw in the top-left corner
-    esp_lcd_panel_draw_bitmap(panel_handle, 5, 5, 35, 30, wifi_buf);
-}
-"""
-    if "display_manager_draw_wifi" not in content:
-        content += new_wifi_func
+    if "{0x93, 0x00}" not in content:
+        content = re.sub(pattern_axp, fix_axp, content)
         with open(disp_c, "w") as f:
             f.write(content)
-        print("-> display_manager.c patched (Wi-Fi graphics added).")
-
-# 3. Add Wi-Fi Polling to Main Loop
-if os.path.exists(main_c):
-    with open(main_c, "r") as f:
-        content = f.read()
-
-    target_loop = "last_charge = charging;\n        }"
-    fix_loop = """last_charge = charging;
-        }
-
-        // --- WIFI RSSI UPDATE LOGIC ---
-        wifi_ap_record_t ap_info;
-        bool wifi_conn = (esp_wifi_sta_get_ap_info(&ap_info) == ESP_OK);
-        int current_rssi = wifi_conn ? ap_info.rssi : 0;
-        
-        static int last_rssi = 1; // Force initial draw
-        static bool last_conn = false;
-        
-        // Update the UI if the signal strength changes by more than 2 dBm or connection state flips
-        if (abs(current_rssi - last_rssi) > 2 || wifi_conn != last_conn) {
-            display_manager_draw_wifi(current_rssi, wifi_conn);
-            last_rssi = current_rssi;
-            last_conn = wifi_conn;
-        }"""
-
-    if "WIFI RSSI UPDATE LOGIC" not in content and target_loop in content:
-        content = content.replace(target_loop, fix_loop)
-        with open(main_c, "w") as f:
-            f.write(content)
-        print("-> app_main.c patched (Wi-Fi polling injected).")
+        print("-> display_manager.c patched (Visual artifacts cleared, Amp powered).")
 
 print("Surgical patch complete.")

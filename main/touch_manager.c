@@ -1,3 +1,4 @@
+#include "speaker_manager.h"
 #include "touch_manager.h"
 #include "freertos/FreeRTOS.h"
 #include "freertos/task.h"
@@ -49,6 +50,7 @@ static void touch_task(void *pvParameters) {
                         }
                     } else if (x >= 100 && x < 220) {
                         // Button B: ML Event Tag 1
+                        if (active_event_tag != 1) { speaker_play_rattle(); } // Fire exactly once on press
                         active_event_tag = 1;
                         if (reset_held_time > 0) { reset_held_time = 0; display_manager_draw_reset_progress(0, false); }
                     } else if (x >= 220) {
