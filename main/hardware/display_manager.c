@@ -22,6 +22,37 @@ static const char *TAG = "DISPLAY";
 #define LCD_HEIGHT     240
 
 static esp_lcd_panel_handle_t panel_handle = NULL;
+static TickType_t last_wake_time = 0;
+static bool screen_on = true;
+
+void core2_set_screen_power(bool enable) {
+    uint8_t reg = 0x12; uint8_t data;
+    i2c_master_write_read_device(I2C_NUM_0, 0x34, &reg, 1, &data, 1, pdMS_TO_TICKS(10));
+    if (enable) data |= 0x02; else data &= ~0x02;
+    uint8_t cmd[2] = {0x12, data};
+    i2c_master_write_to_device(I2C_NUM_0, 0x34, cmd, 2, pdMS_TO_TICKS(10));
+}
+
+void display_manager_wake(void) {
+    last_wake_time = xTaskGetTickCount();
+    if (!screen_on) {
+        core2_set_screen_power(true);
+        screen_on = true;
+        ESP_LOGI("POWER", "Screen Woken Up");
+    }
+}
+
+static void display_sleep_task(void *pvParam) {
+    while(1) {
+        if (screen_on && (xTaskGetTickCount() - last_wake_time > pdMS_TO_TICKS(10000))) {
+            core2_set_screen_power(false);
+            screen_on = false;
+            ESP_LOGI("POWER", "Screen Sleeping (10s Idle)");
+        }
+        vTaskDelay(pdMS_TO_TICKS(1000));
+    }
+}
+
 
 void core2_power_init(void) {
     // 1. Initialize I2C safely
@@ -46,7 +77,7 @@ void core2_power_init(void) {
         {0x12, 0x47}, // Enable DCDC1, DCDC3, LDO2, EXTEN
         {0x82, 0xFF}, // Enable Battery ADC
         {0x93, 0x00}, // AXP192 REG 0x93: GPIO2 Control = Output (NOT 0x9A!)
-        {0x94, 0x04}  // AXP192 REG 0x94: GPIO2 High (Speaker Amp Enable)
+        {0x94, 0x00}  // AXP192 REG 0x94: GPIO2 High (Speaker Amp Enable)
     };
     for(int i=0; i<6; i++) {
         i2c_master_write_to_device(I2C_NUM_0, 0x34, axp_cmd[i], 2, pdMS_TO_TICKS(100));
@@ -55,6 +86,8 @@ void core2_power_init(void) {
 }
 
 void display_manager_init(void) {
+    last_wake_time = xTaskGetTickCount();
+    xTaskCreate(display_sleep_task, "disp_sleep", 2048, NULL, 2, NULL);
     core2_power_init();
     ESP_LOGI(TAG, "Initializing SPI bus for LCD...");
     spi_bus_config_t buscfg = {

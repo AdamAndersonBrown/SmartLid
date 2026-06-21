@@ -9,6 +9,7 @@
 
 volatile int active_event_tag = 0;
 #include "display_manager.h"
+extern void display_manager_wake(void);
 
 static const char *TAG = "TOUCH";
 #define FT6336U_ADDR 0x38
@@ -35,6 +36,7 @@ void touch_task(void *pvParameters) {
                 uint16_t y = ((data[3] & 0x0F) << 8) | data[4];
                 
                 if (y > 240) {
+                    display_manager_wake();
                     is_touched = true;
                     miss_count = 0;
                     
