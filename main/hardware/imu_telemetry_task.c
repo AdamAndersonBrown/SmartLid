@@ -42,6 +42,7 @@ __attribute__((unused)) static esp_err_t i2c_master_init(void) {
 
 
 static void imu_telemetry_task(void *pvParameters) {
+    ESP_LOGI("IMU", "Sensor Producer Task booted on Core %d", xPortGetCoreID());
     // Initialize I2C and wake the MPU6886. 
     // We explicitly avoid writing to the AXP192 to prevent RF amplifier brownouts.
     // I2C initialization is now handled globally by the Display Manager on boot.
@@ -71,8 +72,8 @@ static void imu_telemetry_task(void *pvParameters) {
             int16_t gyro_x = (raw_data[8] << 8) | raw_data[9];
             int16_t gyro_y = (raw_data[10] << 8) | raw_data[11];
             int16_t gyro_z = (raw_data[12] << 8) | raw_data[13];
-            inference_push_data(acc_x, acc_y, acc_z, gyro_x, gyro_y, gyro_z);
-            inference_run();
+            imu_sample_t sample = {acc_x, acc_y, acc_z, gyro_x, gyro_y, gyro_z};
+            xQueueSend(imu_queue, &sample, 0); // 0-wait non-blocking send
 
             struct timeval tv;
             gettimeofday(&tv, NULL);

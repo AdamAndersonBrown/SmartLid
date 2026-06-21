@@ -133,3 +133,26 @@ extern "C" void inference_run(void) {
         current_triggered_class = max_class;
     }
 }
+
+
+extern "C" void inference_task(void *pvParameters) {
+    imu_sample_t sample;
+    ESP_LOGI("TFLM", "ML Consumer Task booted on Core %d", xPortGetCoreID());
+    while(1) {
+        if (xQueueReceive(imu_queue, &sample, portMAX_DELAY) == pdTRUE) {
+            // Push the first sample
+            inference_push_data(sample.ax, sample.ay, sample.az, sample.gx, sample.gy, sample.gz);
+
+            // DRAIN THE QUEUE: Instantly ingest any backlog to keep the AI window in real-time
+            while (xQueueReceive(imu_queue, &sample, 0) == pdTRUE) {
+                inference_push_data(sample.ax, sample.ay, sample.az, sample.gx, sample.gy, sample.gz);
+            }
+
+            // Run the heavy matrix math
+            inference_run();
+
+            // YIELD: Force Core 1 to sleep for 10ms so the Touch Screen task can read the buttons!
+            vTaskDelay(pdMS_TO_TICKS(10));
+        }
+    }
+}

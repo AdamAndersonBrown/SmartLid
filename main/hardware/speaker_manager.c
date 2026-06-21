@@ -1,12 +1,15 @@
 #include "speaker_manager.h"
 #include "freertos/FreeRTOS.h"
 #include "freertos/task.h"
+#include "freertos/semphr.h"
 #include "driver/i2s.h"
 #include "esp_random.h"
 #include "esp_log.h"
 
 static const char *TAG = "SPEAKER";
-volatile bool rattle_requested = false;
+
+// The FreeRTOS token used to instantly wake the audio amplifier
+static SemaphoreHandle_t audio_semaphore = NULL;
 
 static void speaker_task(void *pvParameters) {
     // 1. Configure the I2S Interface for the Core2
@@ -35,14 +38,12 @@ static void speaker_task(void *pvParameters) {
     ESP_LOGI(TAG, "I2S Audio Amplifier Initialized.");
 
     // The Synthetic Rattlesnake Algorithm
-    // A rattle is ~70Hz. 16000 / 70 = 228 samples per "click"
-    // We will do 114 samples of white noise, 114 samples of silence.
     int16_t sample_buffer[228 * 2]; // *2 for stereo channels
     size_t bytes_written;
 
     while(1) {
-        if (rattle_requested) {
-            rattle_requested = false;
+        // Sleep indefinitely at 0% CPU until the UI drops a token
+        if (xSemaphoreTake(audio_semaphore, portMAX_DELAY) == pdTRUE) {
             ESP_LOGW(TAG, "HISSSSSS...");
             
             // Generate 2 seconds of rattle (16000Hz * 2 = 32000 samples / 228 = ~140 loops)
@@ -67,14 +68,20 @@ static void speaker_task(void *pvParameters) {
             // Clear the buffer when done to prevent hum
             i2s_zero_dma_buffer(I2S_NUM_0);
         }
-        vTaskDelay(pdMS_TO_TICKS(50));
+    }
+}
+
+void speaker_manager_init(void) {
+    // Create the token and boot the task exactly once
+    audio_semaphore = xSemaphoreCreateBinary();
+    if (audio_semaphore != NULL) {
+        xTaskCreatePinnedToCore(speaker_task, "speaker_task", 4096, NULL, 2, NULL, 1);
     }
 }
 
 void speaker_play_rattle(void) {
-    rattle_requested = true;
-}
-
-void speaker_manager_init(void) {
-    xTaskCreate(speaker_task, "speaker_task", 4096, NULL, 5, NULL);
+    // FIRE AND FORGET: Drop a token to wake the audio task, then return in 1 microsecond!
+    if (audio_semaphore != NULL) {
+        xSemaphoreGive(audio_semaphore);
+    }
 }

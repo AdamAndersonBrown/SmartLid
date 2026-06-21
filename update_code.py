@@ -1,74 +1,63 @@
-# fix_braces.py
+# nuclear_audio_fix.py
 import os
 
-print("Cleaning up regex syntax debris...")
+print("Executing Nuclear Reset and Perfect Rebuild of Audio Driver...")
 
-inf_cpp = "main/ml/inference_manager.cpp"
-if os.path.exists(inf_cpp):
-    with open(inf_cpp, "r") as f:
+# 1. Force Git to completely overwrite our mangled file with the pristine original
+os.system("git checkout HEAD -- main/hardware/speaker_manager.c")
+
+speaker_c = "main/hardware/speaker_manager.c"
+if os.path.exists(speaker_c):
+    with open(speaker_c, "r") as f:
         content = f.read()
 
-    # Split the file exactly at the definition of the inference runner
-    if 'extern "C" void inference_run(void)' in content:
-        top_half = content.split('extern "C" void inference_run(void)')[0]
+    # 2. Inject Headers, Variables, AND Forward Declarations safely at the top
+    if "freertos/semphr.h" not in content:
+        last_inc = content.rfind('#include')
+        eol = content.find('\n', last_inc) + 1
         
-        # The perfectly formatted, unbroken function
-        clean_function = """extern "C" void inference_run(void) {
-    if (!buffer_full || !interpreter || !input || !output) return;
+        top_injection = """
+#include "freertos/FreeRTOS.h"
+#include "freertos/task.h"
+#include "freertos/semphr.h"
 
-    // Load buffer into TFLite Input Tensor
-    float* input_data = input->data.f;
-    for (int i = 0; i < WINDOW_SIZE; i++) {
-        for (int j = 0; j < NUM_FEATURES; j++) {
-            input_data[i * NUM_FEATURES + j] = ring_buffer[i][j];
+// Globals and Forward Declarations to satisfy the C Compiler's strict ordering
+static SemaphoreHandle_t audio_semaphore = NULL;
+static void speaker_task(void *pvParameters);
+"""
+        content = content[:eol] + top_injection + content[eol:]
+
+    # 3. Rename the original hardware function so it's safely internal
+    content = content.replace("void speaker_play_rattle(void)", "static void speaker_play_rattle_internal(void)")
+
+    # 4. Inject the Semaphore creation and Task spin-up into your init sequence
+    target_init = "void speaker_manager_init(void) {"
+    fix_init = """void speaker_manager_init(void) {
+    audio_semaphore = xSemaphoreCreateBinary();
+    xTaskCreatePinnedToCore(speaker_task, "speaker_task", 4096, NULL, 2, NULL, 1);"""
+    content = content.replace(target_init, fix_init)
+
+    # 5. Append the Background Task and the Public "Fire-and-Forget" API
+    bottom_injection = """
+static void speaker_task(void *pvParameters) {
+    while(1) {
+        if (xSemaphoreTake(audio_semaphore, portMAX_DELAY) == pdTRUE) {
+            speaker_play_rattle_internal();
         }
     }
+}
 
-    // Execute Neural Network
-    if (interpreter->Invoke() != kTfLiteOk) return;
-
-    // Parse Output Probabilities
-    float* results = output->data.f;
-    int max_class = 0;
-    float max_prob = results[0];
-    for (int i = 1; i < 3; i++) {
-        if (results[i] > max_prob) {
-            max_prob = results[i];
-            max_class = i;
-        }
-    }
-
-    // Action Trigger Logic with RTOS Debouncing
-    static int current_triggered_class = 0;
-    static TickType_t last_trigger_time = 0;
-    TickType_t now = xTaskGetTickCount();
-
-    if (max_prob > CONFIDENCE_THRESHOLD) {
-        // 1. Enforce cooldown ONLY for active triggers (Rattle/Open)
-        if (max_class != 0) {
-            if ((now - last_trigger_time) < pdMS_TO_TICKS(TRIGGER_COOLDOWN_MS)) {
-                return; // Cooldown active, discard event
-            }
-            last_trigger_time = now; // Reset cooldown timer for the active event
-        }
-
-        // 2. Execute UI/Hardware Actions
-        if (max_class == 1 || max_class == 2) {
-            display_manager_set_alert(max_class);
-            if (max_class == 1 && current_triggered_class != 1) {
-                speaker_play_rattle();
-            }
-        } else {
-            display_manager_set_alert(0); // Return to idle instantly
-        }
-        current_triggered_class = max_class;
+void speaker_play_rattle(void) {
+    if (audio_semaphore != NULL) {
+        xSemaphoreGive(audio_semaphore);
     }
 }
 """
-        with open(inf_cpp, "w") as f:
-            f.write(top_half + clean_function)
-        print("-> inference_manager.cpp patched (Floating braces cleared).")
-    else:
-        print("-> ERROR: Could not find inference_run signature.")
+    content += bottom_injection
+
+    with open(speaker_c, "w") as f:
+        f.write(content)
+        
+    print("-> speaker_manager.c resurrected from Git and flawlessly patched!")
 else:
-    print("-> ERROR: Could not find inference_manager.cpp")
+    print("-> ERROR: Could not find main/hardware/speaker_manager.c")

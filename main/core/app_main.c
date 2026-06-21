@@ -29,8 +29,11 @@ void wifi_prov_print_qr(const char *name, const char *username, const char *pop,
 
 static const char *TAG = "MAIN";
 EventGroupHandle_t wifi_event_group;
+QueueHandle_t imu_queue;
 
 void app_main(void) {
+    // 0. Initialize IPC Queue First to prevent Race Conditions!
+    imu_queue = xQueueCreate(20, sizeof(imu_sample_t));
     esp_err_t ret = nvs_flash_init();
     if (ret == ESP_ERR_NVS_NO_FREE_PAGES || ret == ESP_ERR_NVS_NEW_VERSION_FOUND) {
         ESP_ERROR_CHECK(nvs_flash_erase());
@@ -114,6 +117,14 @@ void app_main(void) {
     
     speaker_manager_init();
     inference_manager_init();
+    
+    // --- Dual-Core Inter-Process Architecture ---
+    // Create a 20-slot memory queue between the cores
+    
+    
+    // Pin the heavy Machine Learning engine to Core 1 (APP CPU)
+    // Leaving Core 0 (PRO CPU) completely free for high-speed Wi-Fi and Sensor Polling
+    xTaskCreatePinnedToCore(inference_task, "inference_task", 8192, NULL, 5, NULL, 1);
     touch_manager_init();
 
     while(1) {

@@ -28,6 +28,16 @@
 extern EventGroupHandle_t wifi_event_group;
 extern volatile int active_event_tag;
 
+
+#include "freertos/queue.h"
+
+// --- Dual-Core Inter-Process Communication ---
+typedef struct {
+    int16_t ax; int16_t ay; int16_t az;
+    int16_t gx; int16_t gy; int16_t gz;
+} imu_sample_t;
+extern QueueHandle_t imu_queue;
+
 // --- Hardware Types ---
 typedef enum {
     LED_STATE_IDLE = 0,
