@@ -1,4 +1,5 @@
 # ESP-IDF
+training_data/
 build/
 dependencies.lock
 managed_components/
