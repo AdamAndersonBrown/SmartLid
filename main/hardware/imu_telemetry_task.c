@@ -6,47 +6,37 @@
 #include <string.h>
 #include "freertos/FreeRTOS.h"
 #include "freertos/task.h"
-#include "freertos/event_groups.h"
+#include "freertos/ringbuf.h"
 #include "esp_log.h"
 #include "lwip/sockets.h"
 #include "driver/i2c.h"
-#include "esp_wifi.h"
 
 extern void display_manager_wake(void);
 
 static const char *TAG = "IMU_TELEMETRY";
-#define I2C_MASTER_SCL_IO 22
-#define I2C_MASTER_SDA_IO 21
 #define I2C_MASTER_NUM I2C_NUM_0
 #define MPU6886_ADDR 0x68
 #define UDP_BROADCAST_PORT 3333
 #define STREAM_DELAY_MS 20
 
-#define BATCH_SIZE 250 // 5 seconds of telemetry
-static char *batch_payloads[BATCH_SIZE];
+// Widen the buffer to 10KB to safely hold 6000 bytes of 5-second burst data
+static RingbufHandle_t telemetry_rb = NULL;
 
-static void imu_telemetry_task(void *pvParameters) {
-    ESP_LOGI("IMU", "Sensor Task booted on Core %d", xPortGetCoreID());
-    
-    // Allocate heap memory for the batched UDP strings to save stack space
-    for(int i = 0; i < BATCH_SIZE; i++) {
-        batch_payloads[i] = malloc(128);
-    }
+typedef struct {
+    int64_t ts;
+    int16_t ax; int16_t ay; int16_t az;
+    int16_t gx; int16_t gy; int16_t gz;
+    int tag;
+} log_record_t;
+
+// --- PRODUCER: The High-Speed Sensor Task ---
+static void imu_sensor_task(void *pvParameters) {
+    ESP_LOGI(TAG, "Sensor Producer Task booted on Core %d", xPortGetCoreID());
 
     uint8_t write_buf[2] = {0x6B, 0x00};
     i2c_master_write_to_device(I2C_MASTER_NUM, MPU6886_ADDR, write_buf, 2, pdMS_TO_TICKS(100));
 
-    int sock = socket(AF_INET, SOCK_DGRAM, IPPROTO_IP);
-    int broadcast_enable = 1;
-    setsockopt(sock, SOL_SOCKET, SO_BROADCAST, &broadcast_enable, sizeof(broadcast_enable));
-
-    struct sockaddr_in dest_addr;
-    dest_addr.sin_family = AF_INET;
-    dest_addr.sin_port = htons(UDP_BROADCAST_PORT);
-    dest_addr.sin_addr.s_addr = inet_addr("255.255.255.255"); 
-
     uint8_t raw_data[14];
-    int batch_idx = 0;
     int16_t last_ax = 0, last_ay = 0, last_az = 0;
 
     while (1) {
@@ -59,39 +49,96 @@ static void imu_telemetry_task(void *pvParameters) {
             int16_t gyro_y = (raw_data[10] << 8) | raw_data[11];
             int16_t gyro_z = (raw_data[12] << 8) | raw_data[13];
 
-            // 1. WAKE-ON-MOTION (Silicon Power Save)
             int16_t delta = abs(acc_x - last_ax) + abs(acc_y - last_ay) + abs(acc_z - last_az);
             if (delta > 100 || active_event_tag != 0) {
                 imu_sample_t sample = {acc_x, acc_y, acc_z, gyro_x, gyro_y, gyro_z};
-                xQueueSend(imu_queue, &sample, 0); // Wake up the AI!
+                xQueueSend(imu_queue, &sample, 0); 
             }
-            if (delta > 6000) {
-                display_manager_wake(); // Wake screen on violent motion
-            }
+            if (delta > 6000) display_manager_wake(); 
             last_ax = acc_x; last_ay = acc_y; last_az = acc_z;
 
-            // 2. NETWORK BATCHING (Modem Power Save)
             struct timeval tv;
             gettimeofday(&tv, NULL);
-            int64_t ts = (int64_t)tv.tv_sec * 1000000LL + tv.tv_usec;
-            
-            snprintf(batch_payloads[batch_idx], 128, "{\"ts\":%lld,\"ax\":%d,\"ay\":%d,\"az\":%d,\"gx\":%d,\"gy\":%d,\"gz\":%d,\"tag\":%d}", ts, acc_x, acc_y, acc_z, gyro_x, gyro_y, gyro_z, active_event_tag);
-            batch_idx++;
+            log_record_t record = {
+                .ts = (int64_t)tv.tv_sec * 1000000LL + tv.tv_usec,
+                .ax = acc_x, .ay = acc_y, .az = acc_z,
+                .gx = gyro_x, .gy = gyro_y, .gz = gyro_z,
+                .tag = active_event_tag
+            };
 
-            if (batch_idx >= BATCH_SIZE) {
-                for(int i = 0; i < BATCH_SIZE; i++) {
-                    sendto(sock, batch_payloads[i], strlen(batch_payloads[i]), 0, (struct sockaddr *)&dest_addr, sizeof(dest_addr));
-                    vTaskDelay(pdMS_TO_TICKS(1)); // 1ms delay to prevent router drop
-                }
-                ESP_LOGI(TAG, "Burst Transmitted %d logs. Network sleeping...", BATCH_SIZE);
-                batch_idx = 0;
-            }
+            xRingbufferSend(telemetry_rb, &record, sizeof(log_record_t), 0);
         }
         vTaskDelay(pdMS_TO_TICKS(STREAM_DELAY_MS));
     }
 }
 
+// --- CONSUMER: The Network Batching Task ---
+static void udp_batch_task(void *pvParameters) {
+    int sock = socket(AF_INET, SOCK_DGRAM, IPPROTO_IP);
+    int broadcast_enable = 1;
+    setsockopt(sock, SOL_SOCKET, SO_BROADCAST, &broadcast_enable, sizeof(broadcast_enable));
+
+    struct sockaddr_in dest_addr;
+    dest_addr.sin_family = AF_INET;
+    dest_addr.sin_port = htons(UDP_BROADCAST_PORT);
+    dest_addr.sin_addr.s_addr = inet_addr("192.168.86.39"); 
+
+    char payload_chunk[1400];
+    int current_len = 0;
+
+    while (1) {
+        // Sleep the network stack for exactly 5 seconds
+        vTaskDelay(pdMS_TO_TICKS(5000));
+
+        size_t item_size;
+        log_record_t *rec;
+        int total_drained = 0;
+        int packets_fired = 0;
+        
+        // Wake up and drain the entire buffer instantly
+        while ((rec = (log_record_t *)xRingbufferReceive(telemetry_rb, &item_size, 0)) != NULL) {
+            
+            if (current_len == 0) {
+                current_len += snprintf(payload_chunk + current_len, sizeof(payload_chunk) - current_len, "[");
+            } else {
+                current_len += snprintf(payload_chunk + current_len, sizeof(payload_chunk) - current_len, ",");
+            }
+
+            current_len += snprintf(payload_chunk + current_len, sizeof(payload_chunk) - current_len, 
+                "{\"ts\":%lld,\"ax\":%d,\"ay\":%d,\"az\":%d,\"gx\":%d,\"gy\":%d,\"gz\":%d,\"tag\":%d}", 
+                rec->ts, rec->ax, rec->ay, rec->az, rec->gx, rec->gy, rec->gz, rec->tag);
+            
+            total_drained++;
+            vRingbufferReturnItem(telemetry_rb, (void *)rec);
+
+            // Fire packet if MTU limit reached
+            if (current_len > 1200) {
+                snprintf(payload_chunk + current_len, sizeof(payload_chunk) - current_len, "]");
+                sendto(sock, payload_chunk, strlen(payload_chunk), 0, (struct sockaddr *)&dest_addr, sizeof(dest_addr));
+                current_len = 0;
+                packets_fired++;
+                vTaskDelay(pdMS_TO_TICKS(20)); // Router breather
+            }
+        }
+
+        // Flush any remaining data
+        if (current_len > 0) {
+            snprintf(payload_chunk + current_len, sizeof(payload_chunk) - current_len, "]");
+            sendto(sock, payload_chunk, strlen(payload_chunk), 0, (struct sockaddr *)&dest_addr, sizeof(dest_addr));
+            current_len = 0;
+            packets_fired++;
+        }
+
+        // Print exact transparent metrics to the serial monitor!
+        ESP_LOGI(TAG, "Network Wake: Drained %d logs across %d UDP packets. Returning to sleep.", total_drained, packets_fired);
+    }
+}
+
 esp_err_t start_imu_telemetry_task(void) {
-    if (xTaskCreatePinnedToCore(imu_telemetry_task, "imu_net_task", 8192, NULL, 10, NULL, 1) != pdPASS) return ESP_FAIL;
+    telemetry_rb = xRingbufferCreate(10240, RINGBUF_TYPE_NOSPLIT); // 10KB Buffer
+    if (telemetry_rb == NULL) return ESP_FAIL;
+
+    xTaskCreatePinnedToCore(imu_sensor_task, "imu_sensor_task", 4096, NULL, 10, NULL, 1);
+    xTaskCreatePinnedToCore(udp_batch_task, "udp_batch_task", 8192, NULL, 5, NULL, 0);
     return ESP_OK;
 }
