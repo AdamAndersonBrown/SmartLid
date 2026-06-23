@@ -43,9 +43,11 @@ void touch_task(void *pvParameters) {
                     miss_count = 0;
                     
                     if (x < 100) {
-                        servo_set_manual(0); // Smooth absolute sweep fully closed
+                        servo_set_manual(0); 
                     } else if (x > 220) {
-                        servo_set_manual(180); // Smooth absolute sweep fully open
+                        servo_set_manual(180); 
+                    } else {
+                        servo_trigger_unlock_sequence(); 
                     }
                 } else if (y > 240) {
                     display_manager_wake();

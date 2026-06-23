@@ -317,13 +317,18 @@ void display_manager_set_alert(int class_id) {
 void display_manager_draw_servo_buttons(void) {
     if (!panel_handle) return;
     static uint16_t ccw_buf[80 * 50];
+    static uint16_t unlock_buf[80 * 50];
     static uint16_t cw_buf[80 * 50];
 
-    // Left Button (CCW) - Blue Visual Indicator
+    // Left Button (CCW) - Blue
     for(int i=0; i<80*50; i++) ccw_buf[i] = 0x001F; 
     esp_lcd_panel_draw_bitmap(panel_handle, 0, 30, 80, 80, ccw_buf);
 
-    // Right Button (CW) - Red Visual Indicator
+    // Middle Button (Unlock) - Green
+    for(int i=0; i<80*50; i++) unlock_buf[i] = 0x07E0; 
+    esp_lcd_panel_draw_bitmap(panel_handle, 120, 30, 200, 80, unlock_buf);
+
+    // Right Button (CW) - Red
     for(int i=0; i<80*50; i++) cw_buf[i] = 0xF800; 
     esp_lcd_panel_draw_bitmap(panel_handle, 240, 30, 320, 80, cw_buf);
 }

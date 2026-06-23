@@ -104,3 +104,28 @@ void servo_set_manual(int target_angle) {
     // 15ms per degree gives a slightly slower, highly deliberate sweep for manual adjustments
     servo_move_smooth(target_angle, 15);
 }
+
+static bool is_unlocking = false;
+
+static void unlock_sequence_task(void *pvParameters) {
+    is_unlocking = true;
+    ESP_LOGI(TAG, "Unlock Sequence Triggered: Sweeping CW (180 deg)");
+    servo_set_manual(180);
+    
+    // Non-blocking wait in the background
+    vTaskDelay(pdMS_TO_TICKS(10000));
+    
+    ESP_LOGI(TAG, "Unlock Sequence Concluding: Sweeping CCW (10 deg)");
+    servo_set_manual(10);
+    
+    is_unlocking = false;
+    vTaskDelete(NULL); // Task deletes itself to free memory
+}
+
+void servo_trigger_unlock_sequence(void) {
+    if (!is_unlocking) {
+        xTaskCreatePinnedToCore(unlock_sequence_task, "unlock_task", 2048, NULL, 3, NULL, 1);
+    } else {
+        ESP_LOGW(TAG, "Unlock sequence already in progress, ignoring tap.");
+    }
+}
