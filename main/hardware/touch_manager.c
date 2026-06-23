@@ -1,5 +1,6 @@
 #include "speaker_manager.h"
 #include "touch_manager.h"
+#include "servo_manager.h"
 #include "freertos/FreeRTOS.h"
 #include "freertos/task.h"
 #include "freertos/event_groups.h"
@@ -35,7 +36,20 @@ void touch_task(void *pvParameters) {
                 uint16_t x = ((data[1] & 0x0F) << 8) | data[2];
                 uint16_t y = ((data[3] & 0x0F) << 8) | data[4];
                 
-                if (y > 240) {
+                if (y >= 20 && y <= 100) {
+                    // Top Screen Touch: Wake screen AND fire servo immediately to remain responsive
+                    display_manager_wake();
+                    is_touched = true;
+                    miss_count = 0;
+                    
+                    if (x < 100) {
+                        servo_step_manual(-10); // Step CCW
+                        vTaskDelay(pdMS_TO_TICKS(150)); // Mechanical pacing debounce
+                    } else if (x > 220) {
+                        servo_step_manual(10); // Step CW
+                        vTaskDelay(pdMS_TO_TICKS(150)); // Mechanical pacing debounce
+                    }
+                } else if (y > 240) {
                     display_manager_wake();
                     is_touched = true;
                     miss_count = 0;

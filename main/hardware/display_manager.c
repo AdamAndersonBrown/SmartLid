@@ -38,6 +38,7 @@ void display_manager_wake(void) {
     if (!screen_on) {
         core2_set_screen_power(true);
         screen_on = true;
+        display_manager_draw_servo_buttons();
         ESP_LOGI("POWER", "Screen Woken Up");
     }
 }
@@ -126,6 +127,7 @@ void display_manager_init(void) {
     ESP_ERROR_CHECK(esp_lcd_panel_disp_on_off(panel_handle, true));
     
     display_manager_fill_screen(COLOR_BLACK);
+    display_manager_draw_servo_buttons();
     ESP_LOGI(TAG, "LCD initialized successfully.");
 }
 
@@ -310,4 +312,18 @@ void display_manager_set_alert(int class_id) {
     for (int y = 30; y < 210; y += 10) {
         esp_lcd_panel_draw_bitmap(panel_handle, 0, y, 320, y + 10, row_buf);
     }
+}
+
+void display_manager_draw_servo_buttons(void) {
+    if (!panel_handle) return;
+    static uint16_t ccw_buf[80 * 50];
+    static uint16_t cw_buf[80 * 50];
+
+    // Left Button (CCW) - Blue Visual Indicator
+    for(int i=0; i<80*50; i++) ccw_buf[i] = 0x001F; 
+    esp_lcd_panel_draw_bitmap(panel_handle, 0, 30, 80, 80, ccw_buf);
+
+    // Right Button (CW) - Red Visual Indicator
+    for(int i=0; i<80*50; i++) cw_buf[i] = 0xF800; 
+    esp_lcd_panel_draw_bitmap(panel_handle, 240, 30, 320, 80, cw_buf);
 }

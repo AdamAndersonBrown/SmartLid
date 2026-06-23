@@ -1,5 +1,6 @@
 #include "inference_manager.h"
 #include "speaker_manager.h"
+#include "servo_manager.h"
 #include "esp_sntp.h"
 #include "esp_wifi.h"
 extern void wifi_prov_print_qr(const char *name, const char *username, const char *pop, const char *transport);
@@ -116,6 +117,7 @@ void app_main(void) {
     tzset();
     
     speaker_manager_init();
+    servo_manager_init();
     inference_manager_init();
     
     // --- Dual-Core Inter-Process Architecture ---

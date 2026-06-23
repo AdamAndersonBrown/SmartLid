@@ -27,3 +27,5 @@ void display_manager_set_alert(int class_id);
 void display_manager_draw_tag(int tag);
 
 #endif // DISPLAY_MANAGER_H
+
+void display_manager_draw_servo_buttons(void);
