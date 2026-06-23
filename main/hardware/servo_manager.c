@@ -20,23 +20,42 @@ static inline uint32_t angle_to_compare(int angle) {
     return (angle * (SERVO_MAX_PULSEWIDTH_US - SERVO_MIN_PULSEWIDTH_US) / 180) + SERVO_MIN_PULSEWIDTH_US;
 }
 
+// --- Smooth Interpolation Engine ---
+static void servo_move_smooth(int target_angle, int delay_ms) {
+    // Hard mechanical limits to prevent piano wire binding
+    if (target_angle < 0) target_angle = 0;
+    if (target_angle > 180) target_angle = 180;
+
+    if (comparator != NULL) {
+        int step = (target_angle > current_servo_angle) ? 1 : -1;
+        while (current_servo_angle != target_angle) {
+            current_servo_angle += step;
+            mcpwm_comparator_set_compare_value(comparator, angle_to_compare(current_servo_angle));
+            vTaskDelay(pdMS_TO_TICKS(delay_ms)); // Pause between physical 1-degree steps
+        }
+    } else {
+        current_servo_angle = target_angle;
+    }
+}
+
 static void servo_task(void *pvParameters) {
     while (1) {
         if (xSemaphoreTake(latch_semaphore, portMAX_DELAY) == pdTRUE) {
             ESP_LOGW(TAG, "Actuating Latch Assembly...");
-            current_servo_angle = 90;
-            ESP_ERROR_CHECK(mcpwm_comparator_set_compare_value(comparator, angle_to_compare(current_servo_angle)));
+            
+            // Sweep to 90 degrees (8ms per degree = ~720ms total travel time)
+            servo_move_smooth(180, 8); 
             vTaskDelay(pdMS_TO_TICKS(1500)); // Hold open against springs
             
             ESP_LOGI(TAG, "Releasing Latch...");
-            current_servo_angle = 0;
-            ESP_ERROR_CHECK(mcpwm_comparator_set_compare_value(comparator, angle_to_compare(current_servo_angle)));
+            // Sweep back to 0 degrees safely
+            servo_move_smooth(0, 8); 
         }
     }
 }
 
 void servo_manager_init(void) {
-    ESP_LOGI(TAG, "Initializing MCPWM V5 Driver on GPIO 33");
+    ESP_LOGI(TAG, "Initializing Smooth MCPWM V5 Driver on GPIO 33");
     
     mcpwm_timer_handle_t timer = NULL;
     mcpwm_timer_config_t timer_config = {
@@ -69,7 +88,9 @@ void servo_manager_init(void) {
     ESP_ERROR_CHECK(mcpwm_timer_start_stop(timer, MCPWM_TIMER_START_NO_STOP));
 
     current_servo_angle = 0;
-    ESP_ERROR_CHECK(mcpwm_comparator_set_compare_value(comparator, angle_to_compare(current_servo_angle)));
+    
+    // 0 duty cycle = Limp mode to prevent violent boot snap
+    ESP_ERROR_CHECK(mcpwm_comparator_set_compare_value(comparator, 0));
 
     latch_semaphore = xSemaphoreCreateBinary();
     xTaskCreatePinnedToCore(servo_task, "servo_task", 4096, NULL, 3, NULL, 1);
@@ -79,13 +100,7 @@ void servo_actuate_latch(void) {
     if (latch_semaphore != NULL) xSemaphoreGive(latch_semaphore);
 }
 
-void servo_step_manual(int step_degrees) {
-    current_servo_angle += step_degrees;
-    // Hard mechanical limits to prevent binding the piano wire
-    if (current_servo_angle < 0) current_servo_angle = 0;
-    if (current_servo_angle > 180) current_servo_angle = 180;
-    
-    if (comparator != NULL) {
-        mcpwm_comparator_set_compare_value(comparator, angle_to_compare(current_servo_angle));
-    }
+void servo_set_manual(int target_angle) {
+    // 15ms per degree gives a slightly slower, highly deliberate sweep for manual adjustments
+    servo_move_smooth(target_angle, 15);
 }

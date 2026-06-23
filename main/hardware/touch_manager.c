@@ -43,11 +43,9 @@ void touch_task(void *pvParameters) {
                     miss_count = 0;
                     
                     if (x < 100) {
-                        servo_step_manual(-10); // Step CCW
-                        vTaskDelay(pdMS_TO_TICKS(150)); // Mechanical pacing debounce
+                        servo_set_manual(0); // Smooth absolute sweep fully closed
                     } else if (x > 220) {
-                        servo_step_manual(10); // Step CW
-                        vTaskDelay(pdMS_TO_TICKS(150)); // Mechanical pacing debounce
+                        servo_set_manual(180); // Smooth absolute sweep fully open
                     }
                 } else if (y > 240) {
                     display_manager_wake();
