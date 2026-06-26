@@ -2,7 +2,7 @@
 #define COMMON_DEFS_H
 
 // --- ML & Telemetry Parameters ---
-#define WINDOW_SIZE 20
+#define WINDOW_SIZE 100
 #define NUM_FEATURES 6
 #define NORMALIZATION_FACTOR 32768.0f
 #define POLLING_RATE_MS 50
@@ -10,7 +10,7 @@
 // --- Inference Engine Parameters ---
 #define TRIGGER_COOLDOWN_MS 3000
 #define CONFIDENCE_THRESHOLD 0.85f
-#define TENSOR_ARENA_SIZE 32768
+#define TENSOR_ARENA_SIZE 65536
 
 
 #include "freertos/FreeRTOS.h"

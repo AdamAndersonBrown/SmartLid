@@ -50,7 +50,7 @@ static void imu_sensor_task(void *pvParameters) {
             int16_t gyro_z = (raw_data[12] << 8) | raw_data[13];
 
             int16_t delta = abs(acc_x - last_ax) + abs(acc_y - last_ay) + abs(acc_z - last_az);
-            if (delta > 100 || active_event_tag != 0) {
+            if (1) { // TEMPORAL COMPRESSION DISABLED FOR ML
                 imu_sample_t sample = {acc_x, acc_y, acc_z, gyro_x, gyro_y, gyro_z};
                 xQueueSend(imu_queue, &sample, 0); 
             }

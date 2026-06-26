@@ -34,7 +34,7 @@ QueueHandle_t imu_queue;
 
 void app_main(void) {
     // 0. Initialize IPC Queue First to prevent Race Conditions!
-    imu_queue = xQueueCreate(20, sizeof(imu_sample_t));
+    imu_queue = xQueueCreate(100, sizeof(imu_sample_t));
     esp_err_t ret = nvs_flash_init();
     if (ret == ESP_ERR_NVS_NO_FREE_PAGES || ret == ESP_ERR_NVS_NEW_VERSION_FOUND) {
         ESP_ERROR_CHECK(nvs_flash_erase());

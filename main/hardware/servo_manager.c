@@ -44,12 +44,12 @@ static void servo_task(void *pvParameters) {
             ESP_LOGW(TAG, "Actuating Latch Assembly...");
             
             // Sweep to 90 degrees (8ms per degree = ~720ms total travel time)
-            servo_move_smooth(180, 8); 
+            servo_move_smooth(180, 2); 
             vTaskDelay(pdMS_TO_TICKS(1500)); // Hold open against springs
             
             ESP_LOGI(TAG, "Releasing Latch...");
             // Sweep back to 0 degrees safely
-            servo_move_smooth(0, 8); 
+            servo_move_smooth(0, 2); 
         }
     }
 }
@@ -101,8 +101,8 @@ void servo_actuate_latch(void) {
 }
 
 void servo_set_manual(int target_angle) {
-    // 15ms per degree gives a slightly slower, highly deliberate sweep for manual adjustments
-    servo_move_smooth(target_angle, 15);
+    // 3ms per degree gives a 5x faster sweep for active ML unlocks for manual adjustments
+    servo_move_smooth(target_angle, 3);
 }
 
 static bool is_unlocking = false;
