@@ -32,6 +32,7 @@ def load_and_window_data(directory, window_size):
         match = re.search(r'class_(\d+)', filename)
         if not match: continue
         true_tag = int(match.group(1))
+        if true_tag >= NUM_CLASSES: continue # Ignore calibration datasets like [3] TUMBLE
         
         filepath = os.path.join(directory, filename)
         data = []
@@ -95,7 +96,7 @@ model = models.Sequential([
 ])
 
 model.compile(optimizer='adam', loss='sparse_categorical_crossentropy', metrics=['accuracy'])
-model.fit(X_train, y_train, epochs=25, validation_data=(X_val, y_val), batch_size=32, class_weight=class_weight_dict)
+model.fit(X_train, y_train, epochs=50, validation_data=(X_val, y_val), batch_size=32, class_weight=class_weight_dict)
 
 converter = tf.lite.TFLiteConverter.from_keras_model(model)
 tflite_model = converter.convert()
