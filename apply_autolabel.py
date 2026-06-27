@@ -1,88 +1,80 @@
+# update_autozero.py
 import os
-import sys
 import json
-import numpy as np
+import re
 
-# Connect to the dashboard directory
-DASHBOARD_DIR = r"C:\Workbench\smart_trash_dashboard"
-sys.path.append(DASHBOARD_DIR)
-import imu_filter
-
-def apply_autolabel():
-    lift_file = os.path.join(DASHBOARD_DIR, "training_data", "class_2_lift.jsonl")
-    if not os.path.exists(lift_file): 
-        print(f"Error: Could not find {lift_file}")
+def inject_autozero():
+    dashboard_dir = r"C:\Workbench\smart_trash_dashboard"
+    cal_file = os.path.join(dashboard_dir, "imu_calibration.json")
+    
+    # 1. Locate C++ Inference Manager dynamically
+    cpp_file = None
+    for root, dirs, files in os.walk("."):
+        if "inference_manager.cpp" in files:
+            cpp_file = os.path.join(root, "inference_manager.cpp")
+            break
+            
+    if not cpp_file:
+        print("Error: inference_manager.cpp not found.")
         return
 
-    # 1. Load data
-    raw_data = []
-    with open(lift_file, 'r', encoding='utf-8') as f:
-        for line in f:
-            try:
-                parsed = json.loads(line.strip())
-                pts = parsed if isinstance(parsed, list) else [parsed]
-                raw_data.extend(pts)
-            except: pass
+    # 2. Extract live floats from JSON to use as the boot-up baseline
+    gb = [0.0, 0.0, 0.0]
+    if os.path.exists(cal_file):
+        with open(cal_file, 'r') as f:
+            cal = json.load(f)
+            gb = cal.get('gyro_bias_adc', gb)
 
-    # 2. Split into distinct temporal bursts
-    bursts = []
-    current_burst = []
-    for i, pt in enumerate(raw_data):
-        if i == 0:
-            current_burst.append(pt)
-            continue
-        if pt['ts'] - raw_data[i-1]['ts'] > 1000000: 
-            if len(current_burst) > 10: bursts.append(current_burst)
-            current_burst = []
-        current_burst.append(pt)
-    if len(current_burst) > 10: bursts.append(current_burst)
+    # 3. Format the dynamic Auto-Zeroing State Machine
+    new_block = f"""// 2. Gyro ZRO (Dynamic Thermal Auto-Zeroing State Machine)
+    static float current_gyro_bias[3] = {{{gb[0]:.2f}f, {gb[1]:.2f}f, {gb[2]:.2f}f}};
+    static int stationary_count = 0;
+    static int32_t gyro_sum[3] = {{0, 0, 0}};
 
-    old_cwd = os.getcwd()
-    os.chdir(DASHBOARD_DIR)
+    // Gate: Are we perfectly still? (Raw fluctuations < ~0.4 deg/s)
+    if (fabs(gx - current_gyro_bias[0]) < 50.0f &&
+        fabs(gy - current_gyro_bias[1]) < 50.0f &&
+        fabs(gz - current_gyro_bias[2]) < 50.0f) {{
 
-    changes_made = 0
+        gyro_sum[0] += gx; 
+        gyro_sum[1] += gy; 
+        gyro_sum[2] += gz;
+        stationary_count++;
 
-    for burst in bursts:
-        engine = imu_filter.IMUFusionEngine(sample_rate=50.0)
-        motion_path = engine.process_window(burst)
-        
-        # Phase 1: Identify core Lift events
-        core_lift = [False] * len(motion_path)
-        for i, pt in enumerate(motion_path):
-            if pt['vz'] > 0.06 or (pt['vz'] > -0.05 and (abs(pt['c_gy']) > 40.0 or abs(pt['c_gx']) > 40.0)):
-                core_lift[i] = True
-
-        # Phase 2: Pad 500ms
-        keep_flags = [False] * len(motion_path)
-        for i, is_lift in enumerate(core_lift):
-            if is_lift:
-                for j in range(max(0, i - 25), min(len(motion_path), i + 25)):
-                    keep_flags[j] = True
-
-        # Phase 3: Carve out Set-Downs
-        for i, pt in enumerate(motion_path):
-            if pt['vz'] < -0.15:
-                for j in range(max(0, i - 10), min(len(motion_path), i + 15)):
-                    keep_flags[j] = False
-
-        # Phase 4: Apply labels to the original dictionaries
-        for i, pt in enumerate(motion_path):
-            original_pt = burst[i]
-            current_ignore = original_pt.get('ignore', False)
-            should_ignore = not keep_flags[i]
+        // If dead silent for 2 seconds (100 frames @ 50Hz), safely recalibrate
+        if (stationary_count >= 100) {{
+            // Exponential Moving Average (EMA) to prevent quaternion snap (80/20 blend)
+            current_gyro_bias[0] = (current_gyro_bias[0] * 0.8f) + (((float)gyro_sum[0] / 100.0f) * 0.2f);
+            current_gyro_bias[1] = (current_gyro_bias[1] * 0.8f) + (((float)gyro_sum[1] / 100.0f) * 0.2f);
+            current_gyro_bias[2] = (current_gyro_bias[2] * 0.8f) + (((float)gyro_sum[2] / 100.0f) * 0.2f);
             
-            if should_ignore and not current_ignore:
-                original_pt['ignore'] = True
-                changes_made += 1
+            stationary_count = 0;
+            gyro_sum[0] = 0; gyro_sum[1] = 0; gyro_sum[2] = 0;
+        }}
+    }} else {{
+        // Motion detected: Abort zeroing to protect the baseline
+        stationary_count = 0;
+        gyro_sum[0] = 0; gyro_sum[1] = 0; gyro_sum[2] = 0;
+    }}
 
-    os.chdir(old_cwd)
+    float gx_rad = ((gx - current_gyro_bias[0]) / 131.0f) * 0.0174533f;
+    float gy_rad = ((gy - current_gyro_bias[1]) / 131.0f) * 0.0174533f;
+    float gz_rad = ((gz - current_gyro_bias[2]) / 131.0f) * 0.0174533f;"""
 
-    # 3. Rewrite the JSONL file
-    with open(lift_file, 'w', encoding='utf-8') as f:
-        for pt in raw_data:
-            f.write(json.dumps(pt) + '\n')
+    # 4. Inject into C++ file
+    with open(cpp_file, 'r', encoding='utf-8') as f:
+        content = f.read()
 
-    print(f"SUCCESS: Permanently applied {changes_made} new 'ignore: true' labels to class_2_lift.jsonl")
+    # Find the old static gyro block and replace it
+    pattern = r"// 2\. Gyro ZRO.*?float gz_rad = .*?;"
+    
+    if re.search(pattern, content, flags=re.DOTALL):
+        updated_content = re.sub(pattern, new_block, content, flags=re.DOTALL)
+        with open(cpp_file, 'w', encoding='utf-8') as f:
+            f.write(updated_content)
+        print(f"SUCCESS: {cpp_file} patched with Dynamic Thermal Auto-Zeroing.")
+    else:
+        print("Error: Could not find the Gyro ZRO injection block in C++ file.")
 
 if __name__ == "__main__":
-    apply_autolabel()
+    inject_autozero()
