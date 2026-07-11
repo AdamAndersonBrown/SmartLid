@@ -32,7 +32,21 @@ static const char *TAG = "MAIN";
 EventGroupHandle_t wifi_event_group;
 QueueHandle_t imu_queue;
 
+#include "esp_pm.h"
+
+bool wifi_logging_enabled = true;
+
 void app_main(void) {
+    // Enable DFS to sleep the CPU during the 20ms IMU polling gaps
+#if CONFIG_PM_ENABLE
+    esp_pm_config_t pm_config = {
+        .max_freq_mhz = 240,
+        .min_freq_mhz = 80, // Clamped to 80MHz to protect the I2C APB Baud Rate
+        .light_sleep_enable = true
+    };
+    esp_pm_configure(&pm_config);
+#endif
+
     // 0. Initialize IPC Queue First to prevent Race Conditions!
     imu_queue = xQueueCreate(100, sizeof(imu_sample_t));
     esp_err_t ret = nvs_flash_init();
@@ -105,9 +119,6 @@ void app_main(void) {
         esp_restart();
     }
 
-    // Only start the telemetry task on a clean, connected boot
-    start_imu_telemetry_task();
-
         // Initialize Real-Time Clock via SNTP
     ESP_LOGI(TAG, "Initializing SNTP for real-time syncing...");
     esp_sntp_setoperatingmode(SNTP_OPMODE_POLL);
@@ -116,8 +127,19 @@ void app_main(void) {
     setenv("TZ", "PST8PDT", 1); // Pacific Time
     tzset();
     
+    // --- NEW: Go dark for multi-day test ---
+    vTaskDelay(pdMS_TO_TICKS(3000)); // Give SNTP time to sync the clock
+    
+    ESP_LOGI(TAG, "Initialization complete. Shutting down Wi-Fi for Deployment Mode.");
+    wifi_logging_enabled = false;
+    esp_wifi_disconnect();
+    esp_wifi_stop(); // Physically powers down the RF PHY layer
+    display_manager_fill_screen(COLOR_BLACK);
+    // ---------------------------------------
+
     speaker_manager_init();
     servo_manager_init();
+    start_imu_telemetry_task(); // Start polling AFTER boot handling is done
     inference_manager_init();
     
     // --- Dual-Core Inter-Process Architecture ---

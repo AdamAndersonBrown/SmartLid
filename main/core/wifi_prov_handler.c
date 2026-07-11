@@ -32,6 +32,8 @@
 // Logging Tag specific to this file
 static const char *TAG = "WIFI_PROV";
 
+extern bool wifi_logging_enabled;
+
 // --- Security Version 2 Helpers (if enabled) ---
 #ifdef CONFIG_PROV_SECURITY_VERSION_2
 
@@ -281,10 +283,14 @@ void event_handler(void* arg, esp_event_base_t event_base,
                  break;
              case WIFI_EVENT_STA_DISCONNECTED: {
                  wifi_event_sta_disconnected_t* evt = (wifi_event_sta_disconnected_t*) event_data;
-                 ESP_LOGW(TAG, "EVENT: Wi-Fi disconnected. Reason: %d. Attempting to reconnect...", evt->reason);
+                 ESP_LOGW(TAG, "EVENT: Wi-Fi disconnected. Reason: %d.", evt->reason);
                  led_manager_set_state(LED_STATE_WIFI_CONNECTING);
                  xEventGroupClearBits(wifi_event_group, WIFI_CONNECTED_BIT);
-                 esp_wifi_connect();
+                 
+                 // NEW: Only attempt reconnect if we didn't manually shut down the radio!
+                 if (wifi_logging_enabled) {
+                     esp_wifi_connect();
+                 }
                  break;
              }
              #ifdef CONFIG_PROV_TRANSPORT_SOFTAP

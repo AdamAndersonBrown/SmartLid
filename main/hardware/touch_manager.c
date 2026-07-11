@@ -11,17 +11,18 @@
 volatile int active_event_tag = 0;
 #include "display_manager.h"
 extern void display_manager_wake(void);
+#include "esp_wifi.h"
+extern bool wifi_logging_enabled;
 
 static const char *TAG = "TOUCH";
 #define FT6336U_ADDR 0x38
 #define RESET_TIME_MS 7000
 #define WARN_TIME_MS  5000
 
-
-
 void touch_task(void *pvParameters) {
     uint8_t data[5];
     int reset_held_time = 0;
+    int wifi_held_time = 0;
     int miss_count = 0;
     int last_tag = -1;
 
@@ -33,34 +34,30 @@ void touch_task(void *pvParameters) {
         if (err == ESP_OK) {
             uint8_t touch_points = data[0] & 0x0F;
             if (touch_points > 0 && touch_points <= 2) {
-                uint16_t x = ((data[1] & 0x0F) << 8) | data[2];
+                uint16_t raw_x = ((data[1] & 0x0F) << 8) | data[2];
                 uint16_t y = ((data[3] & 0x0F) << 8) | data[4];
                 
+                // HARDWARE FIX: Invert X-Axis to match physical Core2 LCD orientation
+                uint16_t x = 320 - raw_x; 
+                
                 if (y >= 20 && y <= 100) {
-                    // Top Screen Touch: Wake screen AND fire servo immediately to remain responsive
                     display_manager_wake();
                     is_touched = true;
                     miss_count = 0;
-                    
-                    if (x < 100) {
-                        servo_set_manual(0); 
-                    } else if (x > 220) {
-                        servo_set_manual(180); 
-                    } else {
-                        servo_trigger_unlock_sequence(); 
-                    }
+                    if (x < 100) { servo_set_manual(0); }
+                    else if (x > 220) { servo_set_manual(180); }
+                    else { servo_trigger_unlock_sequence(); }
                 } else if (y > 240) {
                     display_manager_wake();
                     is_touched = true;
                     miss_count = 0;
                     
-                    if (x < 100) {
-                        // Button A: Factory Reset
+                    if (x < 100) { 
+                        // LEFT CHIN: Factory Reset (7 seconds)
                         active_event_tag = 0;
                         reset_held_time += 50;
-                        
-                        bool warn = (reset_held_time >= WARN_TIME_MS);
-                        display_manager_draw_reset_progress((reset_held_time * 100) / RESET_TIME_MS, warn);
+                        wifi_held_time = 0; // Clear other timers
+                        display_manager_draw_reset_progress((reset_held_time * 100) / RESET_TIME_MS, (reset_held_time >= WARN_TIME_MS));
                         
                         if (reset_held_time >= RESET_TIME_MS) {
                             ESP_LOGE(TAG, "!!! FACTORY RESET TRIGGERED BY TOUCH !!!");
@@ -68,15 +65,33 @@ void touch_task(void *pvParameters) {
                             reset_held_time = 0; 
                             vTaskDelay(pdMS_TO_TICKS(5000));
                         }
-                    } else if (x >= 100 && x < 220) {
-                        // Button B: ML Event Tag 1
-                        if (active_event_tag != 1) { speaker_play_rattle(); } // Fire exactly once on press
+                    } else if (x >= 100 && x < 220) { 
+                        // MIDDLE CHIN: Rattle Test & Tag 1
+                        if (active_event_tag != 1) { speaker_play_rattle(); }
                         active_event_tag = 1;
-                        if (reset_held_time > 0) { reset_held_time = 0; display_manager_draw_reset_progress(0, false); }
-                    } else if (x >= 220) {
-                        // Button C: ML Event Tag 2
+                        reset_held_time = 0; wifi_held_time = 0;
+                        display_manager_draw_reset_progress(0, false);
+                    } else if (x >= 220) { 
+                        // RIGHT CHIN: Tag 2 & Wi-Fi Toggle (3 seconds)
                         active_event_tag = 2;
-                        if (reset_held_time > 0) { reset_held_time = 0; display_manager_draw_reset_progress(0, false); }
+                        reset_held_time = 0;
+                        display_manager_draw_reset_progress(0, false);
+                        
+                        wifi_held_time += 50; // Accumulate time
+                        if (wifi_held_time >= 3000) {
+                            wifi_logging_enabled = !wifi_logging_enabled;
+                            if (wifi_logging_enabled) {
+                                ESP_LOGW(TAG, "Diagnostic Mode: Wi-Fi WAKING UP");
+                                esp_wifi_start(); esp_wifi_connect();
+                                display_manager_fill_screen(0x001F); // COLOR_BLUE
+                            } else {
+                                ESP_LOGW(TAG, "Deployment Mode: Wi-Fi KILLED");
+                                esp_wifi_disconnect(); esp_wifi_stop(); 
+                                display_manager_fill_screen(0x0000); // COLOR_BLACK
+                            }
+                            wifi_held_time = 0; 
+                            vTaskDelay(pdMS_TO_TICKS(1000)); // Debounce toggle
+                        }
                     }
                 }
             }
@@ -86,20 +101,18 @@ void touch_task(void *pvParameters) {
             miss_count++;
             if (miss_count > 5) { // 250ms debounce
                 active_event_tag = 0;
+                wifi_held_time = 0;
                 if (reset_held_time > 0) {
-                    // Abort reset, clear progress bar and warning box
                     reset_held_time = 0;
                     display_manager_draw_reset_progress(0, false);
                 }
             }
         }
 
-        // Only command the SPI bus to draw if the tag actually changed
         if (active_event_tag != last_tag) {
             display_manager_draw_tag(active_event_tag);
             last_tag = active_event_tag;
         }
-
         vTaskDelay(pdMS_TO_TICKS(50));
     }
 }

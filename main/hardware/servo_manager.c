@@ -33,6 +33,13 @@ static void servo_move_smooth(int target_angle, int delay_ms) {
             mcpwm_comparator_set_compare_value(comparator, angle_to_compare(current_servo_angle));
             vTaskDelay(pdMS_TO_TICKS(delay_ms)); // Pause between physical 1-degree steps
         }
+        
+        // --- NEW: SOFTWARE LIMP MODE ---
+        if (target_angle == 0) {
+            vTaskDelay(pdMS_TO_TICKS(150)); // Allow mechanical latch/springs to settle
+            mcpwm_comparator_set_compare_value(comparator, 0); // Drop duty cycle to 0
+            ESP_LOGI(TAG, "Servo returned to 0-Duty Limp Mode");
+        }
     } else {
         current_servo_angle = target_angle;
     }

@@ -21,6 +21,7 @@ static const char *TAG = "IMU_TELEMETRY";
 
 // Widen the buffer to 10KB to safely hold 6000 bytes of 5-second burst data
 static RingbufHandle_t telemetry_rb = NULL;
+extern bool wifi_logging_enabled;
 
 typedef struct {
     int64_t ts;
@@ -35,6 +36,7 @@ static void imu_sensor_task(void *pvParameters) {
 
     uint8_t write_buf[2] = {0x6B, 0x00};
     i2c_master_write_to_device(I2C_MASTER_NUM, MPU6886_ADDR, write_buf, 2, pdMS_TO_TICKS(100));
+    vTaskDelay(pdMS_TO_TICKS(500)); // ALLOW MEMS SENSORS TO STABILIZE BEFORE CALIBRATION
 
     uint8_t raw_data[14];
     int16_t last_ax = 0, last_ay = 0, last_az = 0;
@@ -66,7 +68,10 @@ static void imu_sensor_task(void *pvParameters) {
                 .tag = active_event_tag
             };
 
-            xRingbufferSend(telemetry_rb, &record, sizeof(log_record_t), 0);
+            // NEW: Gate the producer
+            if (wifi_logging_enabled) { 
+                xRingbufferSend(telemetry_rb, &record, sizeof(log_record_t), 0);
+            }
         }
         vTaskDelay(pdMS_TO_TICKS(STREAM_DELAY_MS));
     }
@@ -89,6 +94,15 @@ static void udp_batch_task(void *pvParameters) {
     while (1) {
         // Sleep the network stack for exactly 5 seconds
         vTaskDelay(pdMS_TO_TICKS(5000));
+        
+        if (!wifi_logging_enabled) {
+            // Drain and discard any lingering data to prevent lockups
+            size_t item_size; void *r;
+            while ((r = xRingbufferReceive(telemetry_rb, &item_size, 0)) != NULL) {
+                vRingbufferReturnItem(telemetry_rb, r);
+            }
+            continue; // Skip the UDP formatting and sendto() logic
+        }
 
         size_t item_size;
         log_record_t *rec;
