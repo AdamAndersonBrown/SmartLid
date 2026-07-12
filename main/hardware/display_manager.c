@@ -23,6 +23,9 @@ static const char *TAG = "DISPLAY";
 
 #include "lvgl.h"
 #include "esp_timer.h"
+#include "esp_wifi.h"
+#include "freertos/FreeRTOS.h"
+#include "freertos/semphr.h"
 static esp_lcd_panel_handle_t panel_handle = NULL;
 static lv_disp_drv_t disp_drv; // Global reference for the DMA callback
 
@@ -41,11 +44,16 @@ static void disp_flush_cb(lv_disp_drv_t *disp_drv, const lv_area_t *area, lv_col
 
 static void lv_tick_task(void *arg) { lv_tick_inc(2); }
 
+static SemaphoreHandle_t lvgl_mux = NULL;
+
 static void lvgl_port_task(void *arg) {
-    uint32_t delay_ms;
+    uint32_t delay_ms = 5;
     while (1) {
         if (screen_on) {
-            delay_ms = lv_timer_handler();
+            if (lvgl_mux && xSemaphoreTake(lvgl_mux, pdMS_TO_TICKS(10)) == pdTRUE) {
+                delay_ms = lv_timer_handler();
+                xSemaphoreGive(lvgl_mux);
+            }
             // Clamp delay to ensure UI responsiveness while still allowing RTOS yielding
             if (delay_ms > 50) delay_ms = 50;
             if (delay_ms < 5) delay_ms = 5;
@@ -76,9 +84,12 @@ void display_manager_wake(void) {
     }
 }
 
+static lv_obj_t * qr_bg = NULL; // Global reference to the active QR overlay
+
 static void display_sleep_task(void *pvParam) {
     while(1) {
-        if (screen_on && (xTaskGetTickCount() - last_wake_time > pdMS_TO_TICKS(10000))) {
+        // Block the 10s idle sleep timer if the QR code is currently on screen
+        if (screen_on && qr_bg == NULL && (xTaskGetTickCount() - last_wake_time > pdMS_TO_TICKS(10000))) {
             core2_set_screen_power(false);
             screen_on = false;
             ESP_LOGI("POWER", "Screen Sleeping (10s Idle)");
@@ -129,6 +140,7 @@ static lv_obj_t * lbl_right;
 // --- LVGL STATE BINDINGS (THREAD-SAFE POLLING) ---
 static volatile int ui_batt = 0;
 static volatile bool ui_wifi = false;
+static volatile bool ui_charging = false;
 static volatile int ui_class_id = 0;
 static volatile bool ui_bg_refresh_needed = false;
 static volatile uint16_t ui_bg_color_req = 0x0000;
@@ -138,6 +150,7 @@ static void lvgl_poll_timer_cb(lv_timer_t * timer) {
     static int last_batt = -1;
     static bool last_wifi = false;
     static int last_class = -1;
+    static bool last_charging = false;
     bool header_dirty = false;
 
     if (ui_bg_refresh_needed) {
@@ -148,12 +161,32 @@ static void lvgl_poll_timer_cb(lv_timer_t * timer) {
         ui_bg_refresh_needed = false;
     }
 
-    if (ui_batt != last_batt || ui_wifi != last_wifi) {
+    if (ui_batt != last_batt || ui_wifi != last_wifi || ui_charging != last_charging) {
         last_batt = ui_batt;
         last_wifi = ui_wifi;
+        last_charging = ui_charging;
         header_dirty = true;
+        
+        // Retain dynamic right chin label from previous patch
         if (lbl_right) {
             lv_label_set_text(lbl_right, last_wifi ? "wifi off" : "wifi on");
+        }
+    }
+
+    // SURGICAL FIX: Dismiss the QR code continuously by checking actual WiFi PHY mode,
+    // completely decoupled from the UI state changes.
+    if (qr_bg != NULL) {
+        wifi_mode_t mode;
+        if (esp_wifi_get_mode(&mode) == ESP_OK) {
+            // If SoftAP is disabled, provisioning is over.
+            if (mode != WIFI_MODE_APSTA && mode != WIFI_MODE_AP) {
+                lv_obj_del(qr_bg);
+                qr_bg = NULL;
+            }
+        } else {
+            // If wifi is uninitialized/stopped, we shouldn't show the QR code.
+            lv_obj_del(qr_bg);
+            qr_bg = NULL;
         }
     }
 
@@ -182,14 +215,24 @@ static void lvgl_poll_timer_cb(lv_timer_t * timer) {
     }
 
     if (header_dirty && tv_status) {
-        lv_label_set_text_fmt(tv_status, "WIFI:%s | %s | BAT:%d%%", 
-            last_wifi ? "ON" : "OFF", ui_state_str, last_batt);
+        lv_label_set_text_fmt(tv_status, "WIFI:%s | %s | BAT:%d%%%s", 
+            last_wifi ? "ON" : "OFF", ui_state_str, last_batt, last_charging ? " [+]" : "");
     }
 }
 
 static void lvgl_ui_init(void) {
     // Force the background explicitly black to fix the backlight optical illusion
     lv_obj_set_style_bg_color(lv_scr_act(), lv_color_hex(0x000000), 0);
+    
+    // SURGICAL FIX: Force LVGL to paint a physical black rectangle over the entire screen.
+    // This prevents old ILI9341 GRAM contents (like the QR code) from surviving a software reboot.
+    lv_obj_t * force_bg = lv_obj_create(lv_scr_act());
+    lv_obj_set_size(force_bg, LCD_WIDTH, LCD_HEIGHT);
+    lv_obj_set_style_bg_color(force_bg, lv_color_hex(0x000000), 0);
+    lv_obj_set_style_border_width(force_bg, 0, 0);
+    lv_obj_set_style_radius(force_bg, 0, 0);
+    lv_obj_clear_flag(force_bg, LV_OBJ_FLAG_SCROLLABLE | LV_OBJ_FLAG_CLICKABLE);
+    lv_obj_center(force_bg);
     
     // Zone 1: System Status Header
     tv_status = lv_label_create(lv_scr_act());
@@ -249,6 +292,7 @@ static void lvgl_ui_init(void) {
 // -----------------------------------
 
 void display_manager_init(void) {
+    lvgl_mux = xSemaphoreCreateMutex();
     last_wake_time = xTaskGetTickCount();
     xTaskCreate(display_sleep_task, "disp_sleep", 2048, NULL, 2, NULL);
     core2_power_init();
@@ -334,54 +378,111 @@ void display_manager_fill_screen(uint16_t color) {
     free(buffer);
 }
 
+static lv_img_dsc_t qr_img_dsc;
+static uint16_t * qr_img_data = NULL;
+
 void display_manager_draw_qr(const uint8_t *qrcode, int size) {
-    return; // SURGICAL FIX: LVGL owns the bus. Legacy drawing disabled to prevent SPI deadlocks.
-    if (!panel_handle || !qrcode) return;
+    if (!qrcode) return;
     
-    // Scale the QR code to fit nicely on the 240p screen
-    int scale = 200 / size; 
-    int offset_x = (LCD_WIDTH - (size * scale)) / 2;
-    int offset_y = (LCD_HEIGHT - (size * scale)) / 2;
-
-    display_manager_fill_screen(COLOR_WHITE); // White background for scanner contrast
-
-    uint16_t *block = malloc(scale * scale * sizeof(uint16_t));
-    for (int i = 0; i < scale * scale; i++) block[i] = COLOR_BLACK;
-
-    for (int y = 0; y < size; y++) {
-        for (int x = 0; x < size; x++) {
-            // qrcode array is 1D, packed. True = Black square.
-            if (qrcode[y * size + x]) {
-                int px = offset_x + (x * scale);
-                int py = offset_y + (y * scale);
-                esp_lcd_panel_draw_bitmap(panel_handle, px, py, px + scale, py + scale, block);
-            }
+    display_manager_wake(); // Force the screen to wake up immediately
+    
+    // Thread safety lock ensures WiFi task and Render task don't collide
+    if (lvgl_mux && xSemaphoreTake(lvgl_mux, portMAX_DELAY) == pdTRUE) {
+        
+        // Prevent memory leaks if QR is requested multiple times
+        if (qr_bg != NULL) {
+            lv_obj_del(qr_bg);
+            qr_bg = NULL;
         }
+
+        // Create an overlay panel to hold the QR code securely within the LVGL UI
+        qr_bg = lv_obj_create(lv_scr_act());
+        lv_obj_set_size(qr_bg, LCD_WIDTH, LCD_HEIGHT);
+        lv_obj_set_style_bg_color(qr_bg, lv_color_hex(0xFFFFFF), 0);
+        lv_obj_set_style_pad_all(qr_bg, 0, 0);
+        lv_obj_set_style_border_width(qr_bg, 0, 0);
+        lv_obj_set_style_radius(qr_bg, 0, 0);
+        lv_obj_clear_flag(qr_bg, LV_OBJ_FLAG_SCROLLABLE);
+        lv_obj_center(qr_bg);
+        
+        // Scale the QR code to fit nicely on the 240p screen
+        int scale = 200 / size; 
+        int img_w = size * scale;
+        int img_h = size * scale;
+
+        if (!qr_img_data) {
+            // Attempt to allocate DMA capable memory first, fallback to standard heap
+            qr_img_data = heap_caps_malloc(img_w * img_h * sizeof(uint16_t), MALLOC_CAP_DMA);
+            if (!qr_img_data) qr_img_data = malloc(img_w * img_h * sizeof(uint16_t));
+        }
+
+        if (qr_img_data) {
+            // Fill background white
+            for (int i = 0; i < img_w * img_h; i++) qr_img_data[i] = 0xFFFF;
+
+            // Draw scaled black pixels into the single raw buffer
+            for (int y = 0; y < size; y++) {
+                for (int x = 0; x < size; x++) {
+                    if (qrcode[y * size + x]) {
+                        for (int dy = 0; dy < scale; dy++) {
+                            for (int dx = 0; dx < scale; dx++) {
+                                qr_img_data[(y * scale + dy) * img_w + (x * scale + dx)] = 0x0000;
+                            }
+                        }
+                    }
+                }
+            }
+
+            // Bind buffer to LVGL image descriptor
+            qr_img_dsc.header.always_zero = 0;
+            qr_img_dsc.header.w = img_w;
+            qr_img_dsc.header.h = img_h;
+            qr_img_dsc.data_size = img_w * img_h * sizeof(uint16_t);
+            qr_img_dsc.header.cf = LV_IMG_CF_TRUE_COLOR;
+            qr_img_dsc.data = (const uint8_t *)qr_img_data;
+
+            // Instantiate image as a child of the overlay so it auto-deletes when dismissed
+            lv_obj_t * qr_img_obj = lv_img_create(qr_bg);
+            lv_img_set_src(qr_img_obj, &qr_img_dsc);
+            lv_obj_center(qr_img_obj);
+        }
+        
+        // Append instructional text
+        lv_obj_t * lbl = lv_label_create(qr_bg);
+        lv_label_set_text(lbl, "Scan to Provision Device");
+        lv_obj_set_style_text_color(lbl, lv_color_hex(0x000000), 0);
+        lv_obj_align(lbl, LV_ALIGN_BOTTOM_MID, 0, -5);
+        
+        xSemaphoreGive(lvgl_mux);
     }
-    free(block);
 }
 
-
 void core2_get_battery_state(int *percent, bool *is_charging) {
+    // Rely strictly on Register 0x01 Bit 6 (Active Charge Indication)
+    // This bypasses the noisy VBUS/ACIN pins and only triggers if current is actively flowing to the cell.
+    uint8_t reg_p1 = 0x01, data_p1 = 0;
+    i2c_master_write_read_device(I2C_NUM_0, 0x34, &reg_p1, 1, &data_p1, 1, pdMS_TO_TICKS(10));
+    bool charging = (data_p1 & 0x40) ? true : false;
+    *is_charging = charging;
+
     uint8_t reg_v = 0x78;
-    uint8_t data_v[2];
+    uint8_t data_v[2] = {0, 0};
     i2c_master_write_read_device(I2C_NUM_0, 0x34, &reg_v, 1, data_v, 2, pdMS_TO_TICKS(10));
     uint16_t adc = (data_v[0] << 4) | (data_v[1] & 0x0F);
     float vbatt = adc * 1.1f;
+
+    // Mathematically deflate charging voltage by 90mV to counter AXP192 current push
+    if (charging) { vbatt -= 90.0f; }
+
     int p = (int)((vbatt - 3200.0f) / (4100.0f - 3200.0f) * 100.0f);
     if (p > 100) { p = 100; }
     if (p < 0) { p = 0; }
     *percent = p;
-
-    // Register 0x00: Input power status. Bit 5 = VBUS (USB) present.
-    uint8_t reg_p = 0x00;
-    uint8_t data_p;
-    i2c_master_write_read_device(I2C_NUM_0, 0x34, &reg_p, 1, &data_p, 1, pdMS_TO_TICKS(10));
-    *is_charging = (data_p & 0x20) ? true : false;
 }
 
 void display_manager_draw_battery(int percent, bool is_charging) {
     ui_batt = percent;
+    ui_charging = is_charging;
 }
 
 void display_manager_draw_reset_progress(int percent, bool warning) {

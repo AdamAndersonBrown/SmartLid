@@ -1,97 +1,104 @@
 import os
-import json
 import re
 
-DASHBOARD_DIR = r"C:\Workbench\smart_trash_dashboard"
-DATA_DIR = os.path.join(DASHBOARD_DIR, "training_data")
-WINDOW_SIZE = 100 
+TARGET_FILE = os.path.join("main", "hardware", "display_manager.c")
 
-def deep_audit_dataset(directory):
-    print("--- Detailed Class 2 (Lift) X-Ray Auditor ---")
-    if not os.path.exists(directory):
-        print(f"CRITICAL: Directory not found: {directory}")
+def patch_file():
+    if not os.path.exists(TARGET_FILE):
+        print(f"CRITICAL: {TARGET_FILE} not found in the current directory.")
         return
 
-    total_files = 0
-    total_valid = 0
+    with open(TARGET_FILE, 'r', encoding='utf-8') as f:
+        content = f.read()
+
+    changed = False
+
+    # --- 0. Include Required Header ---
+    if "esp_wifi.h" not in content:
+        content = content.replace(
+            '#include "esp_timer.h"',
+            '#include "esp_timer.h"\n#include "esp_wifi.h"'
+        )
+        changed = True
+
+    # --- 1. Fix GRAM Persistence on Reboot ---
+    target_init = "    // Force the background explicitly black to fix the backlight optical illusion\n    lv_obj_set_style_bg_color(lv_scr_act(), lv_color_hex(0x000000), 0);"
+    safe_init = """    // Force the background explicitly black to fix the backlight optical illusion
+    lv_obj_set_style_bg_color(lv_scr_act(), lv_color_hex(0x000000), 0);
     
-    for filename in os.listdir(directory):
-        if not filename.endswith(".jsonl"): 
-            continue
-            
-        # Broaden search: Catch anything with class_2 OR lift in the name
-        match = re.search(r'class_(\d+)', filename)
-        is_class_2 = match and int(match.group(1)) == 2
-        is_lift = "lift" in filename.lower()
-        
-        if not (is_class_2 or is_lift):
-            continue
-            
-        print(f"\n[ANALYZING FILE: {filename}]")
-        total_files += 1
-        
-        filepath = os.path.join(directory, filename)
-        raw_data = []
-        with open(filepath, 'r', encoding='utf-8') as f:
-            for line in f:
-                try:
-                    parsed = json.loads(line.strip())
-                    pts = parsed if isinstance(parsed, list) else [parsed]
-                    raw_data.extend(pts)
-                except: 
-                    pass
-        
-        if not raw_data:
-            print("  -> ERROR: File is empty or contains invalid JSON.")
-            continue
+    // SURGICAL FIX: Force LVGL to paint a physical black rectangle over the entire screen.
+    // This prevents old ILI9341 GRAM contents (like the QR code) from surviving a software reboot.
+    lv_obj_t * force_bg = lv_obj_create(lv_scr_act());
+    lv_obj_set_size(force_bg, LCD_WIDTH, LCD_HEIGHT);
+    lv_obj_set_style_bg_color(force_bg, lv_color_hex(0x000000), 0);
+    lv_obj_set_style_border_width(force_bg, 0, 0);
+    lv_obj_set_style_radius(force_bg, 0, 0);
+    lv_obj_clear_flag(force_bg, LV_OBJ_FLAG_SCROLLABLE | LV_OBJ_FLAG_CLICKABLE);
+    lv_obj_center(force_bg);"""
+    
+    if target_init in content and "force_bg" not in content:
+        content = content.replace(target_init, safe_init)
+        changed = True
 
-        # 1. Pipeline Replication: Split by 1s gaps
-        initial_bursts = []
-        current = []
-        for i, pt in enumerate(raw_data):
-            if i == 0:
-                current.append(pt)
-                continue
-            
-            # 1,000,000 us = 1 second gap
-            if pt['ts'] - raw_data[i-1]['ts'] > 1000000:
-                initial_bursts.append(current)
-                current = []
-            current.append(pt)
-            
-        if current:
-            initial_bursts.append(current)
+    # --- 2. Fix Session Persistence (Decouple from ui_wifi) ---
+    target_poll_regex = r'(\s*if \(lbl_right\) \{\s*lv_label_set_text\(lbl_right, last_wifi \? "wifi off" : "wifi on"\);\s*\})\s*// SURGICAL FIX: Dismiss the QR code automatically when provisioned/connected\s*if \(ui_wifi && qr_bg != NULL\) \{\s*lv_obj_del\(qr_bg\);\s*qr_bg = NULL;\s*\}\s*\}'
+    
+    safe_poll = r"""\1
+    }
 
-        print(f"  -> Found {len(initial_bursts)} sequence(s) separated by >1s gaps.")
+    // SURGICAL FIX: Dismiss the QR code continuously by checking actual WiFi PHY mode,
+    // completely decoupled from the UI state changes.
+    if (qr_bg != NULL) {
+        wifi_mode_t mode;
+        if (esp_wifi_get_mode(&mode) == ESP_OK) {
+            // If SoftAP is disabled, provisioning is over.
+            if (mode != WIFI_MODE_APSTA && mode != WIFI_MODE_AP) {
+                lv_obj_del(qr_bg);
+                qr_bg = NULL;
+            }
+        } else {
+            // If wifi is uninitialized/stopped, we shouldn't show the QR code.
+            lv_obj_del(qr_bg);
+            qr_bg = NULL;
+        }
+    }"""
+    
+    if re.search(target_poll_regex, content):
+        content = re.sub(target_poll_regex, safe_poll, content)
+        changed = True
+    else:
+        # Fallback if regex fails
+        fallback_target = """        // SURGICAL FIX: Dismiss the QR code automatically when provisioned/connected
+        if (ui_wifi && qr_bg != NULL) {
+            lv_obj_del(qr_bg);
+            qr_bg = NULL;
+        }
+    }"""
+        fallback_safe = """    }
         
-        file_valid = 0
-        for b_idx, burst in enumerate(initial_bursts):
-            total_points = len(burst)
-            duration_sec = (burst[-1]['ts'] - burst[0]['ts']) / 1000000.0
-            
-            # Check Pipeline Rule 1: Must be > 50 points
-            if total_points <= 50:
-                print(f"    [X] Sequence {b_idx}: REJECTED (Only {total_points} pts. Fails pipeline >50 pt cutoff)")
-                continue
-                
-            ignored_count = sum(1 for p in burst if p.get('ignore', False))
-            clean_count = total_points - ignored_count
-            
-            # Check Pipeline Rule 2: Must have >= WINDOW_SIZE (100) clean points
-            if clean_count >= WINDOW_SIZE:
-                print(f"    [+] Sequence {b_idx}: VALID   ({duration_sec:.2f}s | Clean: {clean_count} | Ignored: {ignored_count})")
-                file_valid += 1
-                total_valid += 1
-            else:
-                reason = f"Clean points ({clean_count}) < WINDOW_SIZE ({WINDOW_SIZE})"
-                print(f"    [X] Sequence {b_idx}: REJECTED ({duration_sec:.2f}s | {reason} | Ignored: {ignored_count})")
+    // SURGICAL FIX: Dismiss the QR code continuously by checking actual WiFi PHY mode.
+    if (qr_bg != NULL) {
+        wifi_mode_t mode;
+        if (esp_wifi_get_mode(&mode) == ESP_OK) {
+            if (mode != WIFI_MODE_APSTA && mode != WIFI_MODE_AP) {
+                lv_obj_del(qr_bg);
+                qr_bg = NULL;
+            }
+        } else {
+            lv_obj_del(qr_bg);
+            qr_bg = NULL;
+        }
+    }"""
+        if fallback_target in content:
+            content = content.replace(fallback_target, fallback_safe)
+            changed = True
 
-        print(f"  -> Summary: {file_valid} valid events extracted from {filename}.")
-
-    print("\n" + "="*45)
-    print(f"Total Files Analyzed: {total_files}")
-    print(f"Total Valid Lift Events Ready for Model: {total_valid}")
-    print("="*45)
+    if changed:
+        with open(TARGET_FILE, 'w', encoding='utf-8') as f:
+            f.write(content)
+        print("SUCCESS: QR dismissal logic decoupled from UI events. GRAM persistence neutralized.")
+    else:
+        print("FAILED: Target anchor points not found. File was not modified.")
 
 if __name__ == "__main__":
-    deep_audit_dataset(DATA_DIR)
+    patch_file()
