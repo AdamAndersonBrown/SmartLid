@@ -123,6 +123,7 @@ void core2_power_init(void) {
 // --- ENTERPRISE UI INSTANTIATION ---
 static lv_obj_t * tv_status;
 static lv_obj_t * tv_telemetry;
+static lv_obj_t * lbl_right;
 
 
 // --- LVGL STATE BINDINGS (THREAD-SAFE POLLING) ---
@@ -151,6 +152,9 @@ static void lvgl_poll_timer_cb(lv_timer_t * timer) {
         last_batt = ui_batt;
         last_wifi = ui_wifi;
         header_dirty = true;
+        if (lbl_right) {
+            lv_label_set_text(lbl_right, last_wifi ? "wifi off" : "wifi on");
+        }
     }
 
     if (ui_class_id != last_class) {
@@ -205,7 +209,7 @@ static void lvgl_ui_init(void) {
     lv_obj_set_style_text_color(lbl_left, lv_color_hex(0x8B949E), 0);
     lv_obj_align(lbl_left, LV_ALIGN_BOTTOM_LEFT, 5, -5);
 
-    lv_obj_t * lbl_right = lv_label_create(lv_scr_act());
+    lbl_right = lv_label_create(lv_scr_act());
     lv_label_set_text(lbl_right, "wifi on");
     lv_obj_set_style_text_color(lbl_right, lv_color_hex(0x8B949E), 0);
     lv_obj_align(lbl_right, LV_ALIGN_BOTTOM_RIGHT, -5, -5);
