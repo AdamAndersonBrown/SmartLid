@@ -86,7 +86,7 @@ static void udp_batch_task(void *pvParameters) {
     struct sockaddr_in dest_addr;
     dest_addr.sin_family = AF_INET;
     dest_addr.sin_port = htons(UDP_BROADCAST_PORT);
-    dest_addr.sin_addr.s_addr = inet_addr("192.168.86.39"); 
+    dest_addr.sin_addr.s_addr = inet_addr("255.255.255.255"); 
 
     char payload_chunk[1400];
     int current_len = 0;

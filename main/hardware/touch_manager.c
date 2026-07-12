@@ -38,7 +38,7 @@ void touch_task(void *pvParameters) {
                 uint16_t y = ((data[3] & 0x0F) << 8) | data[4];
                 
                 // HARDWARE FIX: Invert X-Axis to match physical Core2 LCD orientation
-                uint16_t x = 320 - raw_x; 
+                uint16_t x = raw_x; 
                 
                 if (y >= 20 && y <= 100) {
                     display_manager_wake();
@@ -82,7 +82,7 @@ void touch_task(void *pvParameters) {
                             wifi_logging_enabled = !wifi_logging_enabled;
                             if (wifi_logging_enabled) {
                                 ESP_LOGW(TAG, "Diagnostic Mode: Wi-Fi WAKING UP");
-                                esp_wifi_start(); esp_wifi_connect();
+                                esp_wifi_start();
                                 display_manager_fill_screen(0x001F); // COLOR_BLUE
                             } else {
                                 ESP_LOGW(TAG, "Deployment Mode: Wi-Fi KILLED");
