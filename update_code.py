@@ -11,48 +11,38 @@ def patch_file():
     with open(TARGET_FILE, 'r', encoding='utf-8') as f:
         content = f.read()
 
+    # The new target color: Amber/Orange for high visibility against Blue and Black
+    safe_str = "lv_obj_set_style_bg_color(btn_unlock, lv_color_hex(0xE67E22), 0); // Shifted to Orange"
+    
+    # Try literal replacements first based on the previous patch variants
+    target_str_1 = "lv_obj_set_style_bg_color(btn_unlock, lv_color_hex(0x0044FF), 0); // Shifted to Blue"
+    target_str_2 = "lv_obj_set_style_bg_color(btn_unlock, lv_color_hex(0x0044FF), 0);"
+    
     changed = False
-
-    # 1. Inject the Global LVGL Display Driver and DMA Callback
-    target_globals = "static esp_lcd_panel_handle_t panel_handle = NULL;"
-    safe_globals = """static esp_lcd_panel_handle_t panel_handle = NULL;
-static lv_disp_drv_t disp_drv; // Global reference for the DMA callback
-
-static bool notify_lvgl_flush_ready(esp_lcd_panel_io_handle_t panel_io, esp_lcd_panel_io_event_data_t *edata, void *user_ctx) {
-    lv_disp_flush_ready(&disp_drv);
-    return false;
-}"""
-    if "notify_lvgl_flush_ready" not in content:
-        content = content.replace(target_globals, safe_globals)
+    
+    if target_str_1 in content:
+        content = content.replace(target_str_1, safe_str)
         changed = True
-
-    # 2. Neuter the immediate flush call to prevent the race condition
-    target_flush = "lv_disp_flush_ready(disp_drv);"
-    safe_flush = "(void)disp_drv; // SURGICAL FIX: lv_disp_flush_ready deferred to DMA hardware callback"
-    if target_flush in content:
-        content = content.replace(target_flush, safe_flush)
+    elif target_str_2 in content:
+        content = content.replace(target_str_2, safe_str)
         changed = True
-
-    # 3. Register the DMA callback in the SPI IO Configuration
-    target_io = ".trans_queue_depth = 10,"
-    safe_io = ".trans_queue_depth = 10,\n        .on_color_trans_done = notify_lvgl_flush_ready,"
-    if ".on_color_trans_done" not in content and target_io in content:
-        content = content.replace(target_io, safe_io)
-        changed = True
-
-    # 4. Remove the local disp_drv declaration since we elevated it to global scope
-    # Regex used to handle any minor whitespace variations
-    content_new = re.sub(r'static lv_disp_drv_t disp_drv;\s*lv_disp_drv_init\(&disp_drv\);', 'lv_disp_drv_init(&disp_drv);', content)
-    if content_new != content:
-        content = content_new
-        changed = True
+    else:
+        # Fallback to regex if formatting got mangled by the IDE
+        content_new = re.sub(
+            r'lv_obj_set_style_bg_color\s*\(\s*btn_unlock\s*,\s*lv_color_hex\s*\([^)]+\)\s*,\s*0\s*\)[^\n]*',
+            safe_str,
+            content
+        )
+        if content_new != content:
+            content = content_new
+            changed = True
 
     if changed:
         with open(TARGET_FILE, 'w', encoding='utf-8') as f:
             f.write(content)
-        print(f"SUCCESS: Surgical patch applied. DMA Tearing resolved.")
+        print("SUCCESS: Surgical patch applied. TEST LIFT button changed to Orange.")
     else:
-        print("FAILED: Target sequences not found or already patched. The file was not modified.")
+        print("FAILED: Could not find the TEST LIFT button color definition.")
 
 if __name__ == "__main__":
     patch_file()

@@ -65,12 +65,9 @@ void touch_task(void *pvParameters) {
                             reset_held_time = 0; 
                             vTaskDelay(pdMS_TO_TICKS(5000));
                         }
-                    } else if (x >= 100 && x < 220) { 
-                        // MIDDLE CHIN: Rattle Test & Tag 1
-                        if (active_event_tag != 1) { speaker_play_rattle(); }
-                        active_event_tag = 1;
+                    } else if (x >= 100 && x < 220) {
+                        // MIDDLE CHIN: Disabled per UI removal
                         reset_held_time = 0; wifi_held_time = 0;
-                        display_manager_draw_reset_progress(0, false);
                     } else if (x >= 220) { 
                         // RIGHT CHIN: Tag 2 & Wi-Fi Toggle (3 seconds)
                         active_event_tag = 2;

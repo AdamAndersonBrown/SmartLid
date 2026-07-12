@@ -201,25 +201,21 @@ static void lvgl_ui_init(void) {
 
     // Zone 4: Chin Legends (Mapping to physical hardware bezel)
     lv_obj_t * lbl_left = lv_label_create(lv_scr_act());
-    lv_label_set_text(lbl_left, "v 7s:RST");
+    lv_label_set_text(lbl_left, "wifi reset");
     lv_obj_set_style_text_color(lbl_left, lv_color_hex(0x8B949E), 0);
     lv_obj_align(lbl_left, LV_ALIGN_BOTTOM_LEFT, 5, -5);
 
-    lv_obj_t * lbl_mid = lv_label_create(lv_scr_act());
-    lv_label_set_text(lbl_mid, "v TAG 1");
-    lv_obj_set_style_text_color(lbl_mid, lv_color_hex(0x8B949E), 0);
-    lv_obj_align(lbl_mid, LV_ALIGN_BOTTOM_MID, 0, -5);
-
     lv_obj_t * lbl_right = lv_label_create(lv_scr_act());
-    lv_label_set_text(lbl_right, "v 3s:WIFI");
+    lv_label_set_text(lbl_right, "wifi on");
     lv_obj_set_style_text_color(lbl_right, lv_color_hex(0x8B949E), 0);
     lv_obj_align(lbl_right, LV_ALIGN_BOTTOM_RIGHT, -5, -5);
 
     // Zone 2: Servo Manual Overrides (Visual Only - Intercepted natively by touch_manager)
     lv_obj_t * btn_ccw = lv_btn_create(lv_scr_act());
     lv_obj_set_size(btn_ccw, 90, 60);
+    lv_obj_clear_flag(btn_ccw, LV_OBJ_FLAG_CLICKABLE | LV_OBJ_FLAG_CLICK_FOCUSABLE);
     lv_obj_align(btn_ccw, LV_ALIGN_TOP_LEFT, 5, 25);
-    lv_obj_set_style_bg_color(btn_ccw, lv_color_hex(0x0044FF), 0);
+    lv_obj_set_style_bg_color(btn_ccw, lv_color_hex(0x2EA043), 0); // Forced to Green
     lv_obj_t * lbl_ccw = lv_label_create(btn_ccw);
     lv_label_set_text(lbl_ccw, "LOCK\n(CCW)");
     lv_obj_set_style_text_align(lbl_ccw, LV_TEXT_ALIGN_CENTER, 0);
@@ -227,8 +223,9 @@ static void lvgl_ui_init(void) {
 
     lv_obj_t * btn_unlock = lv_btn_create(lv_scr_act());
     lv_obj_set_size(btn_unlock, 100, 60);
+    lv_obj_clear_flag(btn_unlock, LV_OBJ_FLAG_CLICKABLE | LV_OBJ_FLAG_CLICK_FOCUSABLE);
     lv_obj_align(btn_unlock, LV_ALIGN_TOP_MID, 0, 25);
-    lv_obj_set_style_bg_color(btn_unlock, lv_color_hex(0x2EA043), 0);
+    lv_obj_set_style_bg_color(btn_unlock, lv_color_hex(0xE67E22), 0); // Shifted to Orange
     lv_obj_t * lbl_unlock = lv_label_create(btn_unlock);
     lv_label_set_text(lbl_unlock, "TEST\nLIFT");
     lv_obj_set_style_text_align(lbl_unlock, LV_TEXT_ALIGN_CENTER, 0);
@@ -236,6 +233,7 @@ static void lvgl_ui_init(void) {
 
     lv_obj_t * btn_cw = lv_btn_create(lv_scr_act());
     lv_obj_set_size(btn_cw, 90, 60);
+    lv_obj_clear_flag(btn_cw, LV_OBJ_FLAG_CLICKABLE | LV_OBJ_FLAG_CLICK_FOCUSABLE);
     lv_obj_align(btn_cw, LV_ALIGN_TOP_RIGHT, -5, 25);
     lv_obj_set_style_bg_color(btn_cw, lv_color_hex(0xDA3633), 0);
     lv_obj_t * lbl_cw = lv_label_create(btn_cw);
@@ -277,7 +275,7 @@ void display_manager_init(void) {
 
     esp_lcd_panel_dev_config_t panel_config = {
         .reset_gpio_num = -1, // Reset is handled by AXP192
-        .color_space = ESP_LCD_COLOR_SPACE_RGB,
+        .color_space = ESP_LCD_COLOR_SPACE_BGR,
         .bits_per_pixel = 16,
     };
     ESP_ERROR_CHECK(esp_lcd_new_panel_ili9341(io_handle, &panel_config, &panel_handle));
