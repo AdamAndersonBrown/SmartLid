@@ -21,9 +21,42 @@ static const char *TAG = "DISPLAY";
 #define LCD_WIDTH      320
 #define LCD_HEIGHT     240
 
+#include "lvgl.h"
+#include "esp_timer.h"
 static esp_lcd_panel_handle_t panel_handle = NULL;
-static TickType_t last_wake_time = 0;
+static lv_disp_drv_t disp_drv; // Global reference for the DMA callback
+
+static bool notify_lvgl_flush_ready(esp_lcd_panel_io_handle_t panel_io, esp_lcd_panel_io_event_data_t *edata, void *user_ctx) {
+    lv_disp_flush_ready(&disp_drv);
+    return false;
+}
 static bool screen_on = true;
+
+// --- SURGICAL LVGL PORT HARDWARE LAYER ---
+static void disp_flush_cb(lv_disp_drv_t *disp_drv, const lv_area_t *area, lv_color_t *color_p) {
+    // Safe DMA push without in-place mutation
+    esp_lcd_panel_draw_bitmap(panel_handle, area->x1, area->y1, area->x2 + 1, area->y2 + 1, (uint16_t *)color_p);
+    (void)disp_drv; // SURGICAL FIX: lv_disp_flush_ready deferred to DMA hardware callback
+}
+
+static void lv_tick_task(void *arg) { lv_tick_inc(2); }
+
+static void lvgl_port_task(void *arg) {
+    uint32_t delay_ms;
+    while (1) {
+        if (screen_on) {
+            delay_ms = lv_timer_handler();
+            // Clamp delay to ensure UI responsiveness while still allowing RTOS yielding
+            if (delay_ms > 50) delay_ms = 50;
+            if (delay_ms < 5) delay_ms = 5;
+        } else {
+            delay_ms = 1000; // Deep sleep poll while screen is physically off
+        }
+        vTaskDelay(pdMS_TO_TICKS(delay_ms));
+    }
+}
+// -----------------------------------------
+static TickType_t last_wake_time = 0;
 
 void core2_set_screen_power(bool enable) {
     uint8_t reg = 0x12; uint8_t data;
@@ -86,6 +119,133 @@ void core2_power_init(void) {
     vTaskDelay(pdMS_TO_TICKS(100)); // Allow power to stabilize
 }
 
+
+// --- ENTERPRISE UI INSTANTIATION ---
+static lv_obj_t * tv_status;
+static lv_obj_t * tv_telemetry;
+
+
+// --- LVGL STATE BINDINGS (THREAD-SAFE POLLING) ---
+static volatile int ui_batt = 0;
+static volatile bool ui_wifi = false;
+static volatile int ui_class_id = 0;
+static volatile bool ui_bg_refresh_needed = false;
+static volatile uint16_t ui_bg_color_req = 0x0000;
+static const char* ui_state_str = "IDLE";
+
+static void lvgl_poll_timer_cb(lv_timer_t * timer) {
+    static int last_batt = -1;
+    static bool last_wifi = false;
+    static int last_class = -1;
+    bool header_dirty = false;
+
+    if (ui_bg_refresh_needed) {
+        uint32_t hex = 0x000000;
+        if (ui_bg_color_req == 0x001F) hex = 0x0044FF; // Blue
+        else if (ui_bg_color_req == 0x0000) hex = 0x000000; // Black
+        lv_obj_set_style_bg_color(lv_scr_act(), lv_color_hex(hex), 0);
+        ui_bg_refresh_needed = false;
+    }
+
+    if (ui_batt != last_batt || ui_wifi != last_wifi) {
+        last_batt = ui_batt;
+        last_wifi = ui_wifi;
+        header_dirty = true;
+    }
+
+    if (ui_class_id != last_class) {
+        last_class = ui_class_id;
+        header_dirty = true;
+        if (ui_class_id == 1) {
+            ui_state_str = "RATTLE";
+            if(tv_telemetry) {
+                lv_label_set_text(tv_telemetry, ">>> RATTLE DETECTED <<<");
+                lv_obj_set_style_text_color(tv_telemetry, lv_color_hex(0xE3B341), 0);
+            }
+        } else if (ui_class_id == 2) {
+            ui_state_str = "LIFT";
+            if(tv_telemetry) {
+                lv_label_set_text(tv_telemetry, ">>> LIFT SEQUENCE <<<");
+                lv_obj_set_style_text_color(tv_telemetry, lv_color_hex(0x07E0), 0);
+            }
+        } else {
+            ui_state_str = "IDLE";
+            if(tv_telemetry) {
+                lv_label_set_text(tv_telemetry, "Telemetry Pipeline Active");
+                lv_obj_set_style_text_color(tv_telemetry, lv_color_hex(0x58A6FF), 0);
+            }
+        }
+    }
+
+    if (header_dirty && tv_status) {
+        lv_label_set_text_fmt(tv_status, "WIFI:%s | %s | BAT:%d%%", 
+            last_wifi ? "ON" : "OFF", ui_state_str, last_batt);
+    }
+}
+
+static void lvgl_ui_init(void) {
+    // Force the background explicitly black to fix the backlight optical illusion
+    lv_obj_set_style_bg_color(lv_scr_act(), lv_color_hex(0x000000), 0);
+    
+    // Zone 1: System Status Header
+    tv_status = lv_label_create(lv_scr_act());
+    lv_label_set_text(tv_status, "WIFI:OFF | IDLE | BAT:--%");
+    lv_obj_set_style_text_color(tv_status, lv_color_hex(0xFFFFFF), 0);
+    lv_obj_align(tv_status, LV_ALIGN_TOP_MID, 0, 5);
+
+    // Zone 3: Telemetry Dead-Zone
+    tv_telemetry = lv_label_create(lv_scr_act());
+    lv_label_set_text(tv_telemetry, "Awaiting Telemetry Pipeline...");
+    lv_obj_set_style_text_color(tv_telemetry, lv_color_hex(0x58A6FF), 0);
+    lv_obj_align(tv_telemetry, LV_ALIGN_CENTER, 0, 0);
+
+    // Zone 4: Chin Legends (Mapping to physical hardware bezel)
+    lv_obj_t * lbl_left = lv_label_create(lv_scr_act());
+    lv_label_set_text(lbl_left, "v 7s:RST");
+    lv_obj_set_style_text_color(lbl_left, lv_color_hex(0x8B949E), 0);
+    lv_obj_align(lbl_left, LV_ALIGN_BOTTOM_LEFT, 5, -5);
+
+    lv_obj_t * lbl_mid = lv_label_create(lv_scr_act());
+    lv_label_set_text(lbl_mid, "v TAG 1");
+    lv_obj_set_style_text_color(lbl_mid, lv_color_hex(0x8B949E), 0);
+    lv_obj_align(lbl_mid, LV_ALIGN_BOTTOM_MID, 0, -5);
+
+    lv_obj_t * lbl_right = lv_label_create(lv_scr_act());
+    lv_label_set_text(lbl_right, "v 3s:WIFI");
+    lv_obj_set_style_text_color(lbl_right, lv_color_hex(0x8B949E), 0);
+    lv_obj_align(lbl_right, LV_ALIGN_BOTTOM_RIGHT, -5, -5);
+
+    // Zone 2: Servo Manual Overrides (Visual Only - Intercepted natively by touch_manager)
+    lv_obj_t * btn_ccw = lv_btn_create(lv_scr_act());
+    lv_obj_set_size(btn_ccw, 90, 60);
+    lv_obj_align(btn_ccw, LV_ALIGN_TOP_LEFT, 5, 25);
+    lv_obj_set_style_bg_color(btn_ccw, lv_color_hex(0x0044FF), 0);
+    lv_obj_t * lbl_ccw = lv_label_create(btn_ccw);
+    lv_label_set_text(lbl_ccw, "LOCK\n(CCW)");
+    lv_obj_set_style_text_align(lbl_ccw, LV_TEXT_ALIGN_CENTER, 0);
+    lv_obj_center(lbl_ccw);
+
+    lv_obj_t * btn_unlock = lv_btn_create(lv_scr_act());
+    lv_obj_set_size(btn_unlock, 100, 60);
+    lv_obj_align(btn_unlock, LV_ALIGN_TOP_MID, 0, 25);
+    lv_obj_set_style_bg_color(btn_unlock, lv_color_hex(0x2EA043), 0);
+    lv_obj_t * lbl_unlock = lv_label_create(btn_unlock);
+    lv_label_set_text(lbl_unlock, "TEST\nLIFT");
+    lv_obj_set_style_text_align(lbl_unlock, LV_TEXT_ALIGN_CENTER, 0);
+    lv_obj_center(lbl_unlock);
+
+    lv_obj_t * btn_cw = lv_btn_create(lv_scr_act());
+    lv_obj_set_size(btn_cw, 90, 60);
+    lv_obj_align(btn_cw, LV_ALIGN_TOP_RIGHT, -5, 25);
+    lv_obj_set_style_bg_color(btn_cw, lv_color_hex(0xDA3633), 0);
+    lv_obj_t * lbl_cw = lv_label_create(btn_cw);
+    lv_label_set_text(lbl_cw, "UNLOCK\n(CW)");
+    lv_obj_set_style_text_align(lbl_cw, LV_TEXT_ALIGN_CENTER, 0);
+    lv_obj_center(lbl_cw);
+    lv_timer_create(lvgl_poll_timer_cb, 50, NULL);
+}
+// -----------------------------------
+
 void display_manager_init(void) {
     last_wake_time = xTaskGetTickCount();
     xTaskCreate(display_sleep_task, "disp_sleep", 2048, NULL, 2, NULL);
@@ -111,12 +271,13 @@ void display_manager_init(void) {
         .lcd_param_bits = 8,
         .spi_mode = 0,
         .trans_queue_depth = 10,
+        .on_color_trans_done = notify_lvgl_flush_ready,
     };
     ESP_ERROR_CHECK(esp_lcd_new_panel_io_spi((esp_lcd_spi_bus_handle_t)LCD_HOST, &io_config, &io_handle));
 
     esp_lcd_panel_dev_config_t panel_config = {
         .reset_gpio_num = -1, // Reset is handled by AXP192
-        .color_space = ESP_LCD_COLOR_SPACE_BGR,
+        .color_space = ESP_LCD_COLOR_SPACE_RGB,
         .bits_per_pixel = 16,
     };
     ESP_ERROR_CHECK(esp_lcd_new_panel_ili9341(io_handle, &panel_config, &panel_handle));
@@ -125,15 +286,41 @@ void display_manager_init(void) {
     ESP_ERROR_CHECK(esp_lcd_panel_init(panel_handle));
     ESP_ERROR_CHECK(esp_lcd_panel_invert_color(panel_handle, false)); // Fixed purple tint
     ESP_ERROR_CHECK(esp_lcd_panel_disp_on_off(panel_handle, true));
+
+    // --- SURGICAL LVGL CORE INIT ---
+    lv_init();
+    static lv_disp_draw_buf_t draw_buf;
+    static lv_color_t *buf1 = NULL;
+    buf1 = heap_caps_malloc(LCD_WIDTH * 20 * sizeof(lv_color_t), MALLOC_CAP_DMA);
+    lv_disp_draw_buf_init(&draw_buf, buf1, NULL, LCD_WIDTH * 20);
+
+    lv_disp_drv_init(&disp_drv);
+    disp_drv.hor_res = LCD_WIDTH;
+    disp_drv.ver_res = LCD_HEIGHT;
+    disp_drv.flush_cb = disp_flush_cb;
+    disp_drv.draw_buf = &draw_buf;
+    lv_disp_drv_register(&disp_drv);
+
+    const esp_timer_create_args_t lvgl_tick_timer_args = { .callback = &lv_tick_task, .name = "lvgl_tick" };
+    esp_timer_handle_t lvgl_tick_timer = NULL;
+    esp_timer_create(&lvgl_tick_timer_args, &lvgl_tick_timer);
+    esp_timer_start_periodic(lvgl_tick_timer, 2000); // 2ms tick
+
+    xTaskCreate(lvgl_port_task, "lvgl_task", 4096, NULL, 5, NULL);
+    // -------------------------------
     
     display_manager_fill_screen(COLOR_BLACK);
     display_manager_draw_servo_buttons();
+    lvgl_ui_init();
     ESP_LOGI(TAG, "LCD initialized successfully.");
 }
 
 static uint16_t last_bg_color = COLOR_BLACK;
 
 void display_manager_fill_screen(uint16_t color) {
+    ui_bg_color_req = color;
+    ui_bg_refresh_needed = true;
+    return; // SURGICAL FIX: LVGL owns the bus. Legacy drawing disabled to prevent SPI deadlocks.
     last_bg_color = color;
     if (!panel_handle) return;
     uint16_t *buffer = malloc(LCD_WIDTH * 20 * sizeof(uint16_t));
@@ -146,6 +333,7 @@ void display_manager_fill_screen(uint16_t color) {
 }
 
 void display_manager_draw_qr(const uint8_t *qrcode, int size) {
+    return; // SURGICAL FIX: LVGL owns the bus. Legacy drawing disabled to prevent SPI deadlocks.
     if (!panel_handle || !qrcode) return;
     
     // Scale the QR code to fit nicely on the 240p screen
@@ -191,31 +379,11 @@ void core2_get_battery_state(int *percent, bool *is_charging) {
 }
 
 void display_manager_draw_battery(int percent, bool is_charging) {
-    if (!panel_handle) return;
-    static uint16_t bat_buf[35 * 15]; // Static memory prevents DMA tearing
-    int fill_w = (percent * 26) / 100;
-    
-    for(int y=0; y<15; y++) {
-        for(int x=0; x<35; x++) {
-            uint16_t color = last_bg_color;
-            if (x < 30 && y < 12) {
-                if (x == 0 || x == 29 || y == 0 || y == 11) color = COLOR_WHITE;
-                else if (x > 1 && x < 2 + fill_w && y > 1 && y < 10) {
-                    color = (percent > 20) ? COLOR_WHITE : COLOR_RED;
-                    if (is_charging && x >= 13 && x <= 17 && y >= 4 && y <= 8) {
-                        if (x == 15 || y == 6) color = COLOR_BLACK; 
-                    }
-                }
-            } else if (x >= 30 && x < 33 && y >= 3 && y <= 8) {
-                color = COLOR_WHITE;
-            }
-            bat_buf[y * 35 + x] = color;
-        }
-    }
-    esp_lcd_panel_draw_bitmap(panel_handle, 280, 5, 315, 20, bat_buf);
+    ui_batt = percent;
 }
 
 void display_manager_draw_reset_progress(int percent, bool warning) {
+    return; // SURGICAL FIX: LVGL owns the bus. Legacy drawing disabled to prevent SPI deadlocks.
     if (!panel_handle) return;
     
     static uint16_t prog_buf[320 * 10];
@@ -238,6 +406,7 @@ void display_manager_draw_reset_progress(int percent, bool warning) {
 }
 
 void display_manager_draw_tag(int tag) {
+    return; // SURGICAL FIX: LVGL owns the bus. Legacy drawing disabled to prevent SPI deadlocks.
     if (!panel_handle) return;
     
     static uint16_t b_buf[60 * 60];
@@ -255,66 +424,15 @@ void display_manager_draw_tag(int tag) {
 }
 
 void display_manager_draw_wifi(int rssi, bool connected) {
-    if (!panel_handle) return;
-    static uint16_t wifi_buf[30 * 25]; // 30x25 pixel static block
-    
-    for(int i=0; i<30*25; i++) wifi_buf[i] = last_bg_color;
-
-    if (connected) {
-        int bars = 0;
-        // Standard RSSI to Bar mapping
-        if (rssi > -60) bars = 4;
-        else if (rssi > -70) bars = 3;
-        else if (rssi > -80) bars = 2;
-        else if (rssi > -90) bars = 1;
-
-        // Draw 4 vertical bars of increasing height
-        for (int b = 0; b < 4; b++) {
-            uint16_t color = (b < bars) ? COLOR_WHITE : 0x8410; // Grey if inactive
-            int bx = 2 + (b * 6);  // X offset
-            int bh = 6 + (b * 4);  // Bar height
-            int by = 22 - bh;      // Y offset (anchored to bottom)
-            
-            for (int x = bx; x < bx + 4; x++) {
-                for (int y = by; y < 22; y++) {
-                    wifi_buf[y * 30 + x] = color;
-                }
-            }
-        }
-    } else {
-        // Draw a thick Red X if disconnected
-        for(int i=5; i<20; i++) {
-            for(int w=0; w<3; w++) {
-                wifi_buf[(i) * 30 + (i + w)] = COLOR_RED;
-                wifi_buf[(i) * 30 + (24 - i + w)] = COLOR_RED;
-            }
-        }
-    }
-    
-    // Draw in the top-left corner
-    esp_lcd_panel_draw_bitmap(panel_handle, 5, 5, 35, 30, wifi_buf);
+    ui_wifi = connected;
 }
 
 void display_manager_set_alert(int class_id) {
-    if (!panel_handle) return;
-    static int last_class = -1;
-    if (class_id == last_class) return;
-    last_class = class_id;
-
-    // Green for Open (2), Black for Idle (0) or Rattle (1) to keep it stealthy
-    uint16_t color = (class_id == 2) ? COLOR_GREEN : 0x0000;
-
-    // Draw in horizontal bands to save ESP32 memory overhead
-    static uint16_t row_buf[320 * 10];
-    for (int i = 0; i < 320 * 10; i++) row_buf[i] = color;
-    
-    // Override the middle of the screen, leaving the Battery/Wifi UI intact
-    for (int y = 30; y < 210; y += 10) {
-        esp_lcd_panel_draw_bitmap(panel_handle, 0, y, 320, y + 10, row_buf);
-    }
+    ui_class_id = class_id;
 }
 
 void display_manager_draw_servo_buttons(void) {
+    return; // SURGICAL FIX: LVGL owns the bus. Legacy drawing disabled to prevent SPI deadlocks.
     if (!panel_handle) return;
     static uint16_t ccw_buf[80 * 50];
     static uint16_t unlock_buf[80 * 50];
