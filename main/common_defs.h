@@ -10,7 +10,7 @@
 // --- Inference Engine Parameters ---
 #define TRIGGER_COOLDOWN_MS 3000
 #define CONFIDENCE_THRESHOLD 0.85f
-#define TENSOR_ARENA_SIZE 65536
+#define TENSOR_ARENA_SIZE 49152 // 48 * 1024 aligned with inference_manager.cpp
 
 
 #include "freertos/FreeRTOS.h"

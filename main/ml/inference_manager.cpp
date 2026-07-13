@@ -45,7 +45,7 @@ extern "C" void inference_manager_init(void) {
     resolver.AddSoftmax(); resolver.AddReshape(); resolver.AddRelu();
     resolver.AddExpandDims(); resolver.AddSqueeze(); resolver.AddMean();
     resolver.AddQuantize(); resolver.AddShape(); resolver.AddStridedSlice();
-    resolver.AddPack();
+    resolver.AddPack(); resolver.AddDequantize(); resolver.AddMul();
 
     static tflite::MicroInterpreter static_interpreter(model, resolver, tensor_arena, kTensorArenaSize);
     interpreter = &static_interpreter;
@@ -175,7 +175,7 @@ extern "C" void inference_run(void) {
 
     if (max_prob > 0.85f) {
         if (max_class != 0) {
-            if ((now - last_trigger_time) < pdMS_TO_TICKS(3000)) return; 
+            if ((max_class == current_triggered_class) && ((now - last_trigger_time) < pdMS_TO_TICKS(3000))) return; 
             last_trigger_time = now; 
         }
         if (max_class == 1 || max_class == 2) {
