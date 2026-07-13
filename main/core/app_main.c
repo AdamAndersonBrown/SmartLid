@@ -38,14 +38,14 @@ bool wifi_logging_enabled = true;
 
 void app_main(void) {
     // Enable DFS to sleep the CPU during the 20ms IMU polling gaps
-#if CONFIG_PM_ENABLE
+    // STRICT ENFORCEMENT: Stripped #if macro to prevent silent compilation bypass.
     esp_pm_config_t pm_config = {
         .max_freq_mhz = 240,
         .min_freq_mhz = 80, // Clamped to 80MHz to protect the I2C APB Baud Rate
         .light_sleep_enable = true
     };
-    esp_pm_configure(&pm_config);
-#endif
+    ESP_ERROR_CHECK(esp_pm_configure(&pm_config)); // Fail loudly if Tickless Idle is missing
+    ESP_LOGI(TAG, "POWER OPTIMIZATION: DFS Active. CPU dynamically downclocking to 80MHz during RTOS idle.");
 
     // 0. Initialize IPC Queue First to prevent Race Conditions!
     imu_queue = xQueueCreate(100, sizeof(imu_sample_t));

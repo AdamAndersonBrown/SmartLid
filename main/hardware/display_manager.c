@@ -78,6 +78,8 @@ void display_manager_wake(void) {
     last_wake_time = xTaskGetTickCount();
     if (!screen_on) {
         core2_set_screen_power(true);
+        esp_lcd_panel_disp_on_off(panel_handle, true);
+        vTaskDelay(pdMS_TO_TICKS(150)); // Hardware wake delay to prevent SPI lockup
         screen_on = true;
         display_manager_draw_servo_buttons();
         ESP_LOGI("POWER", "Screen Woken Up");
@@ -90,8 +92,10 @@ static void display_sleep_task(void *pvParam) {
     while(1) {
         // Block the 10s idle sleep timer if the QR code is currently on screen
         if (screen_on && qr_bg == NULL && (xTaskGetTickCount() - last_wake_time > pdMS_TO_TICKS(10000))) {
+            screen_on = false; // Halt LVGL flushes immediately
+            vTaskDelay(pdMS_TO_TICKS(50)); // Drain in-flight DMA
+            esp_lcd_panel_disp_on_off(panel_handle, false); // Sleep SPI Logic
             core2_set_screen_power(false);
-            screen_on = false;
             ESP_LOGI("POWER", "Screen Sleeping (10s Idle)");
         }
         vTaskDelay(pdMS_TO_TICKS(1000));

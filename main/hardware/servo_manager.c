@@ -4,11 +4,14 @@
 #include "freertos/semphr.h"
 #include "esp_log.h"
 #include "driver/mcpwm_prelude.h"
+#include "esp_pm.h"
+#include "esp_rom_sys.h"
 
 static const char *TAG = "SERVO";
 static SemaphoreHandle_t latch_semaphore = NULL;
 static mcpwm_cmpr_handle_t comparator = NULL;
 static int current_servo_angle = 0;
+static esp_pm_lock_handle_t servo_pm_lock = NULL;
 
 // MG996R typical pulse widths
 #define SERVO_MIN_PULSEWIDTH_US 500  // 0 degrees
@@ -26,12 +29,26 @@ static void servo_move_smooth(int target_angle, int delay_ms) {
     if (target_angle < 0) target_angle = 0;
     if (target_angle > 180) target_angle = 180;
 
+    // Prevent Light Sleep from killing the APB Clock during active holding/sweeping
+    if (current_servo_angle == 0 && target_angle > 0) {
+        if (servo_pm_lock) esp_pm_lock_acquire(servo_pm_lock);
+    }
+
     if (comparator != NULL) {
-        int step = (target_angle > current_servo_angle) ? 1 : -1;
+        // Sync interpolation strictly to the 50Hz (20ms) PWM frame to prevent shadow register jitter
+        int step_size = 20 / delay_ms; 
+        if (step_size < 1) step_size = 1;
+        
         while (current_servo_angle != target_angle) {
-            current_servo_angle += step;
+            if (target_angle > current_servo_angle) {
+                current_servo_angle += step_size;
+                if (current_servo_angle > target_angle) current_servo_angle = target_angle;
+            } else {
+                current_servo_angle -= step_size;
+                if (current_servo_angle < target_angle) current_servo_angle = target_angle;
+            }
             mcpwm_comparator_set_compare_value(comparator, angle_to_compare(current_servo_angle));
-            vTaskDelay(pdMS_TO_TICKS(delay_ms)); // Pause between physical 1-degree steps
+            vTaskDelay(pdMS_TO_TICKS(20)); // Yield exactly 1 PWM frame
         }
         
         // --- NEW: SOFTWARE LIMP MODE ---
@@ -39,6 +56,7 @@ static void servo_move_smooth(int target_angle, int delay_ms) {
             vTaskDelay(pdMS_TO_TICKS(150)); // Allow mechanical latch/springs to settle
             mcpwm_comparator_set_compare_value(comparator, 0); // Drop duty cycle to 0
             ESP_LOGI(TAG, "Servo returned to 0-Duty Limp Mode");
+            if (servo_pm_lock) esp_pm_lock_release(servo_pm_lock); // Safe to sleep again
         }
     } else {
         current_servo_angle = target_angle;
@@ -63,6 +81,7 @@ static void servo_task(void *pvParameters) {
 
 void servo_manager_init(void) {
     ESP_LOGI(TAG, "Initializing Smooth MCPWM V5 Driver on GPIO 33");
+    esp_pm_lock_create(ESP_PM_NO_LIGHT_SLEEP, 0, "servo_lck", &servo_pm_lock);
     
     mcpwm_timer_handle_t timer = NULL;
     mcpwm_timer_config_t timer_config = {
@@ -122,8 +141,8 @@ static void unlock_sequence_task(void *pvParameters) {
     // Non-blocking wait in the background
     vTaskDelay(pdMS_TO_TICKS(10000));
     
-    ESP_LOGI(TAG, "Unlock Sequence Concluding: Sweeping CCW (10 deg)");
-    servo_set_manual(10);
+    ESP_LOGI(TAG, "Unlock Sequence Concluding: Sweeping CCW (0 deg)");
+    servo_set_manual(0); // MUST hit 0 to trigger Limp Mode & release PM Lock
     
     is_unlocking = false;
     vTaskDelete(NULL); // Task deletes itself to free memory
