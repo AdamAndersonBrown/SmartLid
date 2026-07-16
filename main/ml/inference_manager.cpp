@@ -148,8 +148,11 @@ extern "C" void inference_push_data(int16_t ax, int16_t ay, int16_t az, int16_t 
     }
 }
 
+extern volatile int ml_active_frames;
+
 extern "C" void inference_run(void) {
     if (!buffer_full || !interpreter || !input || !output) return;
+    if (ml_active_frames <= 0) return; // CHESTERTON'S FENCE: Mahony runs, heavy CNN sleeps
     float* input_data = input->data.f;
     for (int i = 0; i < WINDOW_SIZE; i++) {
         for (int j = 0; j < ML_FEATURES; j++) { input_data[i * ML_FEATURES + j] = ring_buffer[i][j]; }

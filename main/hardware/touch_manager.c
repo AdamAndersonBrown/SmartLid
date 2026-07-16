@@ -15,6 +15,7 @@ extern void display_manager_wake(void);
 extern bool wifi_logging_enabled;
 
 static const char *TAG = "TOUCH";
+extern bool screen_on;
 #define FT6336U_ADDR 0x38
 #define RESET_TIME_MS 7000
 #define WARN_TIME_MS  5000
@@ -110,7 +111,11 @@ void touch_task(void *pvParameters) {
             display_manager_draw_tag(active_event_tag);
             last_tag = active_event_tag;
         }
-        vTaskDelay(pdMS_TO_TICKS(50));
+        if (screen_on) {
+            vTaskDelay(pdMS_TO_TICKS(50));
+        } else {
+            vTaskDelay(pdMS_TO_TICKS(200));
+        }
     }
 }
 

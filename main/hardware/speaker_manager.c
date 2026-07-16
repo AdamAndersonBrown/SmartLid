@@ -28,16 +28,16 @@ static void speaker_task(void *pvParameters) {
     };
     i2s_pin_config_t pin_config = { .bck_io_num = 12, .ws_io_num = 0, .data_out_num = 2, .data_in_num = I2S_PIN_NO_CHANGE };
     
-    i2s_driver_install(I2S_NUM_0, &i2s_config, 0, NULL);
-    i2s_set_pin(I2S_NUM_0, &pin_config);
-    i2s_zero_dma_buffer(I2S_NUM_0);
-    ESP_LOGI(TAG, "I2S Audio Amplifier Initialized (Muted).");
+    ESP_LOGI(TAG, "I2S Audio Task Ready (JIT Init).");
 
     int16_t sample_buffer[228 * 2];
     size_t bytes_written;
 
     while(1) {
         if (xSemaphoreTake(audio_semaphore, portMAX_DELAY) == pdTRUE) {
+            i2s_driver_install(I2S_NUM_0, &i2s_config, 0, NULL);
+            i2s_set_pin(I2S_NUM_0, &pin_config);
+            i2s_zero_dma_buffer(I2S_NUM_0);
             core2_set_amp(true); // POWER ON AMP
             vTaskDelay(pdMS_TO_TICKS(20)); // Wait for AXP192 voltage to stabilize
 
@@ -54,6 +54,7 @@ static void speaker_task(void *pvParameters) {
             }
             i2s_zero_dma_buffer(I2S_NUM_0);
             core2_set_amp(false); // POWER OFF AMP
+            i2s_driver_uninstall(I2S_NUM_0); // RELEASE APB DMA LOCK
         }
     }
 }

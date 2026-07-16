@@ -27,13 +27,14 @@ static const char *TAG = "DISPLAY";
 #include "freertos/FreeRTOS.h"
 #include "freertos/semphr.h"
 static esp_lcd_panel_handle_t panel_handle = NULL;
+esp_timer_handle_t lvgl_tick_timer = NULL;
 static lv_disp_drv_t disp_drv; // Global reference for the DMA callback
 
 static bool notify_lvgl_flush_ready(esp_lcd_panel_io_handle_t panel_io, esp_lcd_panel_io_event_data_t *edata, void *user_ctx) {
     lv_disp_flush_ready(&disp_drv);
     return false;
 }
-static bool screen_on = true;
+bool screen_on = true; // Exported for touch_manager
 
 // --- SURGICAL LVGL PORT HARDWARE LAYER ---
 static void disp_flush_cb(lv_disp_drv_t *disp_drv, const lv_area_t *area, lv_color_t *color_p) {
@@ -79,6 +80,7 @@ void display_manager_wake(void) {
     if (!screen_on) {
         core2_set_screen_power(true);
         esp_lcd_panel_disp_on_off(panel_handle, true);
+        if (lvgl_tick_timer) esp_timer_start_periodic(lvgl_tick_timer, 10000);
         vTaskDelay(pdMS_TO_TICKS(150)); // Hardware wake delay to prevent SPI lockup
         screen_on = true;
         display_manager_draw_servo_buttons();
@@ -94,6 +96,7 @@ static void display_sleep_task(void *pvParam) {
         if (screen_on && qr_bg == NULL && (xTaskGetTickCount() - last_wake_time > pdMS_TO_TICKS(10000))) {
             screen_on = false; // Halt LVGL flushes immediately
             vTaskDelay(pdMS_TO_TICKS(50)); // Drain in-flight DMA
+            if (lvgl_tick_timer) esp_timer_stop(lvgl_tick_timer); // KILL TIMER TO ALLOW OS SLEEP
             esp_lcd_panel_disp_on_off(panel_handle, false); // Sleep SPI Logic
             core2_set_screen_power(false);
             ESP_LOGI("POWER", "Screen Sleeping (10s Idle)");
@@ -123,7 +126,7 @@ void core2_power_init(void) {
     uint8_t axp_cmd[][2] = {
         {0x27, 0xCC}, // DCDC3 (LCD Backlight) 
         {0x28, 0xCC}, // LDO2 (LCD Logic) 3.3V
-        {0x12, 0x47}, // Enable DCDC1, DCDC3, LDO2, EXTEN
+        {0x12, 0x07}, // Enable DCDC1, DCDC3, LDO2 (EXTEN/5V Boost KILLED)
         {0x82, 0xFF}, // Enable Battery ADC
         {0x93, 0x00}, // AXP192 REG 0x93: GPIO2 Control = Output (NOT 0x9A!)
         {0x94, 0x00}  // AXP192 REG 0x94: GPIO2 High (Speaker Amp Enable)
@@ -352,9 +355,9 @@ void display_manager_init(void) {
     lv_disp_drv_register(&disp_drv);
 
     const esp_timer_create_args_t lvgl_tick_timer_args = { .callback = &lv_tick_task, .name = "lvgl_tick" };
-    esp_timer_handle_t lvgl_tick_timer = NULL;
+    // esp_timer_handle_t lvgl_tick_timer = NULL; // Moved to global scope
     esp_timer_create(&lvgl_tick_timer_args, &lvgl_tick_timer);
-    esp_timer_start_periodic(lvgl_tick_timer, 2000); // 2ms tick
+    esp_timer_start_periodic(lvgl_tick_timer, 10000); // 10ms tick (Allows DFS)
 
     xTaskCreate(lvgl_port_task, "lvgl_task", 4096, NULL, 5, NULL);
     // -------------------------------

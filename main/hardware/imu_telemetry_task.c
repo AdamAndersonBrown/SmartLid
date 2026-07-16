@@ -14,6 +14,7 @@
 extern void display_manager_wake(void);
 
 static const char *TAG = "IMU_TELEMETRY";
+volatile int ml_active_frames = 0; // Exported to inference_manager
 #define I2C_MASTER_NUM I2C_NUM_0
 #define MPU6886_ADDR 0x68
 #define UDP_BROADCAST_PORT 3333
@@ -56,7 +57,11 @@ static void imu_sensor_task(void *pvParameters) {
                 imu_sample_t sample = {acc_x, acc_y, acc_z, gyro_x, gyro_y, gyro_z};
                 xQueueSend(imu_queue, &sample, 0); 
             }
-            if (delta > 6000) display_manager_wake(); 
+            if (delta > 6000) { 
+                display_manager_wake(); 
+                ml_active_frames = 150; // Wake ML for 3 seconds
+            }
+            if (ml_active_frames > 0) ml_active_frames--;
             last_ax = acc_x; last_ay = acc_y; last_az = acc_z;
 
             struct timeval tv;
