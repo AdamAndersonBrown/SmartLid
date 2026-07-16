@@ -48,8 +48,8 @@ void touch_task(void *pvParameters) {
                     miss_count = 0;
                     if (!was_touched_last_frame) { // STRICT DEBOUNCE: One tap = One Command
                         ESP_LOGW(TAG, "Touch Detected at X: %d, Y: %d", x, y);
-                        if (x < 100) { ESP_LOGW(TAG, "UI Zone: LEFT (LOCK)"); servo_set_manual(0); }
-                        else if (x > 220) { ESP_LOGW(TAG, "UI Zone: RIGHT (UNLOCK)"); servo_set_manual(180); }
+                        if (x < 100) { ESP_LOGW(TAG, "UI Zone: LEFT (LOCK)"); servo_set_manual(180); }
+                        else if (x > 220) { ESP_LOGW(TAG, "UI Zone: RIGHT (UNLOCK)"); servo_set_manual(0); }
                         else { ESP_LOGW(TAG, "UI Zone: MIDDLE (SEQUENCE)"); servo_trigger_unlock_sequence(); }
                     }
                 } else if (y > 240) {
