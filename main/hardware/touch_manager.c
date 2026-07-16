@@ -26,6 +26,7 @@ void touch_task(void *pvParameters) {
     int wifi_held_time = 0;
     int miss_count = 0;
     int last_tag = -1;
+    bool was_touched_last_frame = false;
 
     while(1) {
         uint8_t reg = 0x02; 
@@ -39,15 +40,18 @@ void touch_task(void *pvParameters) {
                 uint16_t y = ((data[3] & 0x0F) << 8) | data[4];
                 
                 // HARDWARE FIX: Invert X-Axis to match physical Core2 LCD orientation
-                uint16_t x = raw_x; 
+                uint16_t x = 320 - raw_x; 
                 
                 if (y >= 20 && y <= 100) {
                     display_manager_wake();
                     is_touched = true;
                     miss_count = 0;
-                    if (x < 100) { servo_set_manual(0); }
-                    else if (x > 220) { servo_set_manual(180); }
-                    else { servo_trigger_unlock_sequence(); }
+                    if (!was_touched_last_frame) { // STRICT DEBOUNCE: One tap = One Command
+                        ESP_LOGW(TAG, "Touch Detected at X: %d, Y: %d", x, y);
+                        if (x < 100) { ESP_LOGW(TAG, "UI Zone: LEFT (LOCK)"); servo_set_manual(0); }
+                        else if (x > 220) { ESP_LOGW(TAG, "UI Zone: RIGHT (UNLOCK)"); servo_set_manual(180); }
+                        else { ESP_LOGW(TAG, "UI Zone: MIDDLE (SEQUENCE)"); servo_trigger_unlock_sequence(); }
+                    }
                 } else if (y > 240) {
                     display_manager_wake();
                     is_touched = true;
@@ -97,6 +101,7 @@ void touch_task(void *pvParameters) {
         
         if (!is_touched) {
             miss_count++;
+            if (miss_count > 2) was_touched_last_frame = false;
             if (miss_count > 5) { // 250ms debounce
                 active_event_tag = 0;
                 wifi_held_time = 0;
@@ -111,6 +116,7 @@ void touch_task(void *pvParameters) {
             display_manager_draw_tag(active_event_tag);
             last_tag = active_event_tag;
         }
+        if (is_touched) was_touched_last_frame = true;
         if (screen_on) {
             vTaskDelay(pdMS_TO_TICKS(50));
         } else {

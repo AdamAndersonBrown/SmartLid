@@ -9,6 +9,10 @@
 #include "tensorflow/lite/micro/micro_interpreter.h"
 #include "tensorflow/lite/schema/schema_generated.h"
 
+// Exported from servo_manager.c (Global Scope)
+extern "C" volatile uint32_t g_servo_active_ticks;
+extern "C" volatile bool g_is_unlocked;
+
 extern "C" void speaker_play_rattle(void);
 extern "C" void display_manager_set_alert(int class_id);
 extern "C" void servo_trigger_unlock_sequence(void);
@@ -111,6 +115,16 @@ extern "C" void inference_push_data(int16_t ax, int16_t ay, int16_t az, int16_t 
     velocity[1] = (velocity[1] + a_earth_y * dt) * 0.92f;
     velocity[2] = (velocity[2] + (a_earth_z - 9.81f) * dt) * 0.92f;
 
+    // --- MECHANICAL NOISE GATE (BUFFER WIPE) ---
+    // Allow physics (Mahony) to run, but prevent poisoned vibration data from entering the ML array
+    if ((xTaskGetTickCount() - g_servo_active_ticks) < pdMS_TO_TICKS(3500)) {
+        buffer_index = 0;
+        buffer_full = false;
+        velocity[0] = 0.0f; velocity[1] = 0.0f; velocity[2] = 0.0f;
+        return; 
+    }
+    // -------------------------------------------
+
     for (int i = 0; i < WINDOW_SIZE - 1; i++) {
         for (int j = 0; j < ML_FEATURES; j++) { ring_buffer[i][j] = ring_buffer[i+1][j]; }
     }
@@ -148,11 +162,33 @@ extern "C" void inference_push_data(int16_t ax, int16_t ay, int16_t az, int16_t 
     }
 }
 
-extern volatile int ml_active_frames;
+extern "C" volatile int ml_active_frames;
 
 extern "C" void inference_run(void) {
     if (!buffer_full || !interpreter || !input || !output) return;
     if (ml_active_frames <= 0) return; // CHESTERTON'S FENCE: Mahony runs, heavy CNN sleeps
+
+    // --- LID OPEN HALLUCINATION GATE ---
+    // If the bin is open, the gravity vector is rotated. The ML model WILL hallucinate
+    // a LIFT event. We must completely blindfold the AI while unlocked.
+    if (g_is_unlocked) {
+        buffer_index = 0;
+        buffer_full = false;
+        velocity[0] = 0.0f; velocity[1] = 0.0f; velocity[2] = 0.0f;
+        return;
+    }
+    // -----------------------------------
+
+    // --- MECHANICAL NOISE GATE (BUFFER WIPE) ---
+    // Prevent the AI from analyzing the servo's own physical vibrations
+    if ((xTaskGetTickCount() - g_servo_active_ticks) < pdMS_TO_TICKS(3500)) {
+        buffer_index = 0;
+        buffer_full = false;
+        velocity[0] = 0.0f; velocity[1] = 0.0f; velocity[2] = 0.0f;
+        return; 
+    }
+    // -----------------------------
+
     float* input_data = input->data.f;
     for (int i = 0; i < WINDOW_SIZE; i++) {
         for (int j = 0; j < ML_FEATURES; j++) { input_data[i * ML_FEATURES + j] = ring_buffer[i][j]; }
@@ -183,8 +219,14 @@ extern "C" void inference_run(void) {
         }
         if (max_class == 1 || max_class == 2) {
             display_manager_set_alert(max_class);
-            if (max_class == 1 && current_triggered_class != 1) speaker_play_rattle();
-            if (max_class == 2 && current_triggered_class != 2) servo_trigger_unlock_sequence();
+            if (max_class == 1 && current_triggered_class != 1) {
+                ESP_LOGW("ML_TRIGGER", "AI DETECTED RATTLE! Triggering Audio.");
+                speaker_play_rattle();
+            }
+            if (max_class == 2 && current_triggered_class != 2) {
+                ESP_LOGW("ML_TRIGGER", "AI DETECTED LIFT! Triggering Servo Unlock Sequence.");
+                servo_trigger_unlock_sequence();
+            }
         } else {
             display_manager_set_alert(0); 
         }

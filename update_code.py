@@ -1,182 +1,266 @@
 import os
 
-def patch_file(filepath, replacements):
-    if not os.path.exists(filepath):
-        print(f"Error: Could not find {filepath}")
-        return
-    with open(filepath, 'r', encoding='utf-8') as f:
-        content = f.read()
-    for search, replace in replacements:
-        if search in content:
-            content = content.replace(search, replace)
-        else:
-            print(f"Warning: Snippet not found in {filepath} (Already patched?)")
-    with open(filepath, 'w', encoding='utf-8') as f:
-        f.write(content)
-    print(f"Successfully patched {filepath}")
+# You ran python update_code.py from C:\Users\adama\esp\m5_imu_telemetry\
+# so this relative path will work perfectly.
+file_path = os.path.join("main", "hardware", "servo_manager.c")
 
-# 1. Update servo_manager.c
-patch_file("main/hardware/servo_manager.c", [
-    # A. Add global tracking variables
-    (
-        "static int current_servo_angle = 0;\nstatic esp_pm_lock_handle_t servo_pm_lock = NULL;",
-        "static int current_servo_angle = 0;\nstatic esp_pm_lock_handle_t servo_pm_lock = NULL;\nstatic SemaphoreHandle_t servo_mutex = NULL;\nstatic bool pm_lock_acquired = false;\nstatic bool is_unlocking = false;"
-    ),
-    
-    # B. Initialize the Mutex
-    (
-        "void servo_manager_init(void) {\n    ESP_LOGI(TAG, \"Initializing Smooth MCPWM V5 Driver on GPIO 33\");",
-        "void servo_manager_init(void) {\n    servo_mutex = xSemaphoreCreateMutex();\n    ESP_LOGI(TAG, \"Initializing Smooth MCPWM V5 Driver on GPIO 33\");"
-    ),
+c_code = r"""#include "servo_manager.h"
+#include "freertos/FreeRTOS.h"
+#include "freertos/task.h"
+#include "freertos/semphr.h"
+#include "esp_log.h"
+#include "driver/mcpwm_prelude.h"
+#include "esp_pm.h"
 
-    # C. Rewrite servo_move_smooth for Thread-Safety, State Tracking, and Failsafe Resync
-    (
-        """static void servo_move_smooth(int target_angle, int delay_ms) {
-    // Hard mechanical limits to prevent piano wire binding
-    if (target_angle < 0) target_angle = 0;
-    if (target_angle > 180) target_angle = 180;
+static const char *TAG = "SERVO";
+static mcpwm_cmpr_handle_t comparator = NULL;
+static esp_pm_lock_handle_t servo_pm_lock = NULL;
+static bool pm_lock_held = false;
 
-    // Prevent Light Sleep from killing the APB Clock during active holding/sweeping
-    if (current_servo_angle == 0 && target_angle > 0) {
-        if (servo_pm_lock) esp_pm_lock_acquire(servo_pm_lock);
+// Exported for inference_manager.cpp ML blinding
+volatile uint32_t g_servo_active_ticks = 0;
+volatile bool g_is_unlocked = false;
+
+typedef enum {
+    CMD_NONE,
+    CMD_LOCK,
+    CMD_UNLOCK,
+    CMD_LIFT_SEQUENCE
+} servo_cmd_t;
+
+volatile servo_cmd_t pending_cmd = CMD_NONE;
+volatile bool cmd_is_new = false;
+static SemaphoreHandle_t latch_semaphore = NULL;
+
+// MG996R typical pulse widths
+#define SERVO_MIN_US 500
+#define SERVO_MAX_US 2500
+#define SERVO_TIMEBASE_RESOLUTION_HZ 1000000 
+#define SERVO_TIMEBASE_PERIOD 20000    
+
+static inline uint32_t angle_to_compare(int angle) {
+    return (angle * (SERVO_MAX_US - SERVO_MIN_US) / 180) + SERVO_MIN_US;
+}
+
+// --- Power Management Wrappers ---
+static void lock_pm(void) {
+    if (!pm_lock_held && servo_pm_lock) {
+        esp_pm_lock_acquire(servo_pm_lock);
+        pm_lock_held = true;
+        ESP_LOGW(TAG, "+++ PM LOCK ACQUIRED (CPU/PLL Awake for Maximum Torque) +++");
     }
+}
 
-    if (comparator != NULL) {
-        // Sync interpolation strictly to the 50Hz (20ms) PWM frame to prevent shadow register jitter
-        int step_size = 20 / delay_ms; 
-        if (step_size < 1) step_size = 1;
-        
-        while (current_servo_angle != target_angle) {
-            if (target_angle > current_servo_angle) {
-                current_servo_angle += step_size;
-                if (current_servo_angle > target_angle) current_servo_angle = target_angle;
-            } else {
-                current_servo_angle -= step_size;
-                if (current_servo_angle < target_angle) current_servo_angle = target_angle;
-            }
-            mcpwm_comparator_set_compare_value(comparator, angle_to_compare(current_servo_angle));
-            vTaskDelay(pdMS_TO_TICKS(20)); // Yield exactly 1 PWM frame
-        }
-        
-        // --- NEW: SOFTWARE LIMP MODE ---
-        if (target_angle == 0) {
-            vTaskDelay(pdMS_TO_TICKS(150)); // Allow mechanical latch/springs to settle
-            mcpwm_comparator_set_compare_value(comparator, 0); // Drop duty cycle to 0
-            ESP_LOGI(TAG, "Servo returned to 0-Duty Limp Mode");
-            if (servo_pm_lock) esp_pm_lock_release(servo_pm_lock); // Safe to sleep again
-        }
-    } else {
-        current_servo_angle = target_angle;
+static void unlock_pm(void) {
+    if (pm_lock_held && servo_pm_lock) {
+        esp_pm_lock_release(servo_pm_lock);
+        pm_lock_held = false;
+        ESP_LOGW(TAG, "--- PM LOCK RELEASED (DFS & Sleep Allowed) ---");
     }
-}""",
-        """static void servo_move_smooth(int target_angle, int delay_ms) {
-    if (target_angle < 0) target_angle = 0;
-    if (target_angle > 180) target_angle = 180;
+}
 
-    if (servo_mutex) xSemaphoreTake(servo_mutex, portMAX_DELAY);
-
-    // Only acquire lock if we are actively moving away from 0, and don't already have it
-    if (target_angle > 0 && !pm_lock_acquired) {
-        if (servo_pm_lock) esp_pm_lock_acquire(servo_pm_lock);
-        pm_lock_acquired = true;
-    }
-
-    if (comparator != NULL) {
-        if (current_servo_angle == target_angle) {
-            // Failsafe resync pulse: ensures physical hardware matches software state
-            mcpwm_comparator_set_compare_value(comparator, angle_to_compare(target_angle));
-            vTaskDelay(pdMS_TO_TICKS(50));
-        } else {
-            int step_size = 20 / delay_ms; 
-            if (step_size < 1) step_size = 1;
-            
-            while (current_servo_angle != target_angle) {
-                if (target_angle > current_servo_angle) {
-                    current_servo_angle += step_size;
-                    if (current_servo_angle > target_angle) current_servo_angle = target_angle;
-                } else {
-                    current_servo_angle -= step_size;
-                    if (current_servo_angle < target_angle) current_servo_angle = target_angle;
-                }
-                mcpwm_comparator_set_compare_value(comparator, angle_to_compare(current_servo_angle));
-                vTaskDelay(pdMS_TO_TICKS(20)); 
-            }
-        }
-        
-        // --- NEW: SOFTWARE LIMP MODE ---
-        if (target_angle == 0) {
-            vTaskDelay(pdMS_TO_TICKS(150)); // Allow mechanical latch/springs to settle
-            mcpwm_comparator_set_compare_value(comparator, 0); // Drop duty cycle to 0
-            ESP_LOGI(TAG, "Servo returned to 0-Duty Limp Mode");
-            
-            // Strictly release lock ONLY if we actually hold it to prevent FreeRTOS panics
-            if (pm_lock_acquired) {
-                if (servo_pm_lock) esp_pm_lock_release(servo_pm_lock);
-                pm_lock_acquired = false;
-            }
-        }
-    } else {
-        current_servo_angle = target_angle;
-    }
-    
-    if (servo_mutex) xSemaphoreGive(servo_mutex);
-}"""
-    ),
-    
-    # E. Remove lower static declaration of is_unlocking to prevent shadow variable warnings
-    (
-        "static bool is_unlocking = false;\n\nstatic void unlock_sequence_task(void *pvParameters) {",
-        "// static bool is_unlocking = false; // Moved to global scope\n\nstatic void unlock_sequence_task(void *pvParameters) {"
-    ),
-
-    # F. Add abort hook to manual override
-    (
-        """void servo_set_manual(int target_angle) {
-    // 3ms per degree gives a 5x faster sweep for active ML unlocks for manual adjustments
-    servo_move_smooth(target_angle, 3);
-}""",
-        """void servo_set_manual(int target_angle) {
+// --- Thread-Safe Public Invokers ---
+void servo_set_manual(int target_angle) {
     if (target_angle == 0) {
-        is_unlocking = false; // Abort pending automatic unlock sequence
+        ESP_LOGW(TAG, ">>> API REQUEST: LOCK (0 deg) <<<");
+        pending_cmd = CMD_LOCK;
+    } else {
+        ESP_LOGW(TAG, ">>> API REQUEST: UNLOCK (180 deg) <<<");
+        pending_cmd = CMD_UNLOCK;
     }
-    // 3ms per degree gives a 5x faster sweep for active ML unlocks for manual adjustments
-    servo_move_smooth(target_angle, 3);
-}"""
-    ),
+    cmd_is_new = true;
+}
 
-    # G. Replace blocking wait with a chunked wait loop that allows early aborts
-    (
-        """    // Non-blocking wait in the background
-    vTaskDelay(pdMS_TO_TICKS(10000));
+void servo_trigger_unlock_sequence(void) {
+    ESP_LOGW(TAG, ">>> API REQUEST: LIFT SEQUENCE (180 -> 10s -> 0) <<<");
+    pending_cmd = CMD_LIFT_SEQUENCE;
+    cmd_is_new = true;
+}
+
+void servo_actuate_latch(void) {
+    ESP_LOGW(TAG, ">>> LEGACY LATCH REQUEST <<<");
+    pending_cmd = CMD_LIFT_SEQUENCE;
+    cmd_is_new = true;
+}
+
+// --- Synchronized Interpolation Engine ---
+static void servo_move_smooth(int start_angle, int target_angle) {
+    if (start_angle < 0) start_angle = 0;
     
-    ESP_LOGI(TAG, "Unlock Sequence Concluding: Sweeping CCW (0 deg)");
-    servo_set_manual(0); // MUST hit 0 to trigger Limp Mode & release PM Lock
+    // Blind the ML from mechanical vibrations
+    g_servo_active_ticks = xTaskGetTickCount();
+    g_is_unlocked = (target_angle > 0);
     
-    is_unlocking = false;
-    vTaskDelete(NULL); // Task deletes itself to free memory""",
-        """    // Chunked wait loop allows early abort if the user manually taps LOCK
-    for (int i = 0; i < 100; i++) {
-        if (!is_unlocking) break; // Early abort triggered by UI
-        vTaskDelay(pdMS_TO_TICKS(100));
+    if (start_angle == target_angle) return;
+
+    ESP_LOGI(TAG, "--- PWM SWEEP START | Target: %d ---", target_angle);
+    
+    // Sync updates strictly with the 50Hz (20ms) MCPWM cycle because update_cmp_on_tez = true
+    // If we update faster than 20ms, the hardware ignores it, creating jagged stair-stepping.
+    int steps = 36; // Sweep 180 degrees over ~720ms (36 steps * 20ms)
+    float step_size = (float)(target_angle - start_angle) / steps;
+    float current_angle_f = start_angle;
+    
+    TickType_t last_wake_time = xTaskGetTickCount();
+    
+    for (int i = 1; i <= steps; i++) {
+        current_angle_f += step_size;
+        mcpwm_comparator_set_compare_value(comparator, angle_to_compare((int)(current_angle_f + 0.5f)));
+        
+        // Enforce absolute temporal precision (bypassing drift from thread starvation)
+        xTaskDelayUntil(&last_wake_time, pdMS_TO_TICKS(20));
     }
     
-    if (is_unlocking) {
-        ESP_LOGI(TAG, "Unlock Sequence Concluding: Sweeping CCW (0 deg)");
-        servo_set_manual(0); // MUST hit 0 to trigger Limp Mode & release PM Lock
-        is_unlocking = false;
+    mcpwm_comparator_set_compare_value(comparator, angle_to_compare(target_angle));
+    ESP_LOGI(TAG, "--- PWM SWEEP COMPLETE ---");
+}
+
+// --- Isolated Master Task ---
+static void servo_task(void *pvParameters) {
+    int current_physical_target = 0; // ASSUME LOCKED ON BOOT
+
+    // PHYSICAL HOMING: Force the hardware to match the software state on boot
+    ESP_LOGW(TAG, "=== EXECUTING BOOT HOMING SEQUENCE (0 deg) ===");
+    lock_pm();
+    servo_move_smooth(0, 0); 
+    vTaskDelay(pdMS_TO_TICKS(1200)); 
+    mcpwm_comparator_set_compare_value(comparator, 0); // Drop to true Limp Mode
+    unlock_pm();
+
+    while (1) {
+        if (xSemaphoreTake(latch_semaphore, 0) == pdTRUE) {
+            servo_actuate_latch();
+        }
+
+        if (cmd_is_new) {
+            servo_cmd_t cmd = pending_cmd;
+            cmd_is_new = false; // Acknowledge command immediately to allow instant overrides
+
+            ESP_LOGW(TAG, "=== STATE TRACKER | Current Target: %d deg | New Cmd ID: %d ===", current_physical_target, cmd);
+
+            // CRITICAL: Prevent Light Sleep & DFS from killing the APB clock during the active sweep!
+            lock_pm(); 
+
+            if (cmd == CMD_LOCK) {
+                if (current_physical_target == 0) {
+                    ESP_LOGI(TAG, "Already LOCKED (0 deg). Ignoring to prevent mechanical twitch.");
+                    unlock_pm(); // Safe to sleep
+                } else {
+                    ESP_LOGI(TAG, "--- EXECUTING: MANUAL LOCK ---");
+                    servo_move_smooth(current_physical_target, 0);
+                    current_physical_target = 0;
+                    
+                    vTaskDelay(pdMS_TO_TICKS(150)); // Allow mechanical latch/springs to settle
+                    cmd_is_new = false; // FLUSH NOISE: Discard capacitive bounce from the mechanical snap
+                    
+                    ESP_LOGI(TAG, "Severing PWM signal (LIMP MODE). Springs taking over.");
+                    mcpwm_comparator_set_compare_value(comparator, 0); 
+                    g_servo_active_ticks = xTaskGetTickCount();
+                    
+                    unlock_pm(); // Safe to sleep
+                }
+            } 
+            else if (cmd == CMD_UNLOCK) {
+                if (current_physical_target == 180) {
+                    ESP_LOGI(TAG, "Already UNLOCKED (180 deg). Ignoring.");
+                } else {
+                    ESP_LOGI(TAG, "--- EXECUTING: MANUAL UNLOCK ---");
+                    servo_move_smooth(current_physical_target, 180);
+                    current_physical_target = 180;
+                    
+                    cmd_is_new = false; // FLUSH NOISE
+                    
+                    // Intentional: PM Lock remains held at 180 to keep MCPWM APB clock active against springs
+                    ESP_LOGI(TAG, "Holding actively at 180 degrees (Indefinite).");
+                }
+            }
+            else if (cmd == CMD_LIFT_SEQUENCE) {
+                ESP_LOGI(TAG, "--- EXECUTING: LIFT SEQUENCE ---");
+                servo_move_smooth(current_physical_target, 180);
+                current_physical_target = 180;
+                
+                cmd_is_new = false; // FLUSH NOISE
+                
+                ESP_LOGI(TAG, "Waiting 10s... (UI overrides will take immediate precedence)");
+                bool aborted = false;
+                for(int i = 0; i < 100; i++) {
+                    if (cmd_is_new) {
+                        ESP_LOGW(TAG, "!!! SEQUENCE OVERRIDDEN BY NEW UI COMMAND (ID: %d) !!!", pending_cmd);
+                        aborted = true;
+                        break;
+                    }
+                    vTaskDelay(pdMS_TO_TICKS(100));
+                    g_servo_active_ticks = xTaskGetTickCount(); 
+                }
+                
+                if (!aborted) {
+                    ESP_LOGI(TAG, "10s Complete. Auto-closing.");
+                    servo_move_smooth(current_physical_target, 0);
+                    current_physical_target = 0;
+                    
+                    vTaskDelay(pdMS_TO_TICKS(150)); 
+                    cmd_is_new = false; // FLUSH NOISE
+                    
+                    ESP_LOGI(TAG, "Severing PWM signal (LIMP MODE).");
+                    mcpwm_comparator_set_compare_value(comparator, 0);
+                    g_servo_active_ticks = xTaskGetTickCount();
+                    
+                    unlock_pm(); 
+                }
+            }
+        }
+        vTaskDelay(pdMS_TO_TICKS(50));
     }
-    vTaskDelete(NULL); // Task deletes itself to free memory"""
-    )
-])
+}
 
-# 2. Update touch_manager.c
-patch_file("main/hardware/touch_manager.c", [
-    (
-        "uint16_t x = raw_x;",
-        "uint16_t x = 320 - raw_x;"
-    )
-])
+void servo_manager_init(void) {
+    ESP_LOGI(TAG, "Initializing DFS-Immune Thread-Safe MCPWM Driver");
+    
+    // SURGICAL FIX: Must use ESP_PM_CPU_FREQ_MAX. 
+    // NO_LIGHT_SLEEP allows Dynamic Frequency Scaling (DFS) to drop the APB clock to 80MHz 
+    // during vTaskDelay. The MCPWM uses the APB clock, so scaling it corrupts the PWM frequency.
+    esp_pm_lock_create(ESP_PM_CPU_FREQ_MAX, 0, "srv_lck", &servo_pm_lock);
+    
+    latch_semaphore = xSemaphoreCreateBinary();
+    
+    mcpwm_timer_handle_t timer = NULL;
+    mcpwm_timer_config_t timer_config = {
+        .group_id = 0,
+        .clk_src = MCPWM_TIMER_CLK_SRC_DEFAULT,
+        .resolution_hz = SERVO_TIMEBASE_RESOLUTION_HZ,
+        .period_ticks = SERVO_TIMEBASE_PERIOD,
+        .count_mode = MCPWM_TIMER_COUNT_MODE_UP,
+    };
+    ESP_ERROR_CHECK(mcpwm_new_timer(&timer_config, &timer));
 
-print("Patching sequence complete.")
-if __name__ == "__main__":
-    pass
+    mcpwm_oper_handle_t oper = NULL;
+    mcpwm_operator_config_t oper_config = { .group_id = 0 };
+    ESP_ERROR_CHECK(mcpwm_new_operator(&oper_config, &oper));
+    ESP_ERROR_CHECK(mcpwm_operator_connect_timer(oper, timer));
+
+    mcpwm_comparator_config_t comparator_config = { .flags.update_cmp_on_tez = true };
+    ESP_ERROR_CHECK(mcpwm_new_comparator(oper, &comparator_config, &comparator));
+
+    mcpwm_gen_handle_t generator = NULL;
+    mcpwm_generator_config_t generator_config = { .gen_gpio_num = 33 }; 
+    ESP_ERROR_CHECK(mcpwm_new_generator(oper, &generator_config, &generator));
+
+    ESP_ERROR_CHECK(mcpwm_generator_set_action_on_timer_event(generator,
+        MCPWM_GEN_TIMER_EVENT_ACTION(MCPWM_TIMER_DIRECTION_UP, MCPWM_TIMER_EVENT_EMPTY, MCPWM_GEN_ACTION_HIGH)));
+    ESP_ERROR_CHECK(mcpwm_generator_set_action_on_compare_event(generator,
+        MCPWM_GEN_COMPARE_EVENT_ACTION(MCPWM_TIMER_DIRECTION_UP, comparator, MCPWM_GEN_ACTION_LOW)));
+
+    ESP_ERROR_CHECK(mcpwm_timer_enable(timer));
+    ESP_ERROR_CHECK(mcpwm_timer_start_stop(timer, MCPWM_TIMER_START_NO_STOP));
+
+    ESP_ERROR_CHECK(mcpwm_comparator_set_compare_value(comparator, 0)); // SURGICAL FIX: Prevent boot-time DC latch-up
+    xTaskCreatePinnedToCore(servo_task, "srv_tsk", 4096, NULL, 6, NULL, 1); 
+}
+"""
+
+try:
+    with open(file_path, "w") as f:
+        f.write(c_code)
+    print("SUCCESS: servo_manager.c has been completely rewritten and fixed with DFS immunity.")
+except Exception as e:
+    print(f"ERROR: {e}")
