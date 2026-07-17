@@ -175,9 +175,9 @@ static void servo_task(void *pvParameters) {
                 
                 cmd_is_new = false; // FLUSH NOISE
                 
-                ESP_LOGI(TAG, "Waiting 10s... (UI overrides will take immediate precedence)");
+                ESP_LOGI(TAG, "Waiting 3s... (UI overrides will take immediate precedence)");
                 bool aborted = false;
-                for(int i = 0; i < 100; i++) {
+                for(int i = 0; i < 50; i++) {
                     if (cmd_is_new) {
                         ESP_LOGW(TAG, "!!! SEQUENCE OVERRIDDEN BY NEW UI COMMAND (ID: %d) !!!", pending_cmd);
                         aborted = true;
@@ -188,7 +188,7 @@ static void servo_task(void *pvParameters) {
                 }
                 
                 if (!aborted) {
-                    ESP_LOGI(TAG, "10s Complete. Auto-closing.");
+                    ESP_LOGI(TAG, "3s Complete. Auto-closing.");
                     servo_move_smooth(current_physical_target, 0);
                     current_physical_target = 0;
                     

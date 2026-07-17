@@ -40,7 +40,7 @@ void touch_task(void *pvParameters) {
                 uint16_t y = ((data[3] & 0x0F) << 8) | data[4];
                 
                 // HARDWARE FIX: Invert X-Axis to match physical Core2 LCD orientation
-                uint16_t x = 320 - raw_x; 
+                uint16_t x = raw_x; 
                 
                 if (y >= 20 && y <= 100) {
                     display_manager_wake();
@@ -48,8 +48,8 @@ void touch_task(void *pvParameters) {
                     miss_count = 0;
                     if (!was_touched_last_frame) { // STRICT DEBOUNCE: One tap = One Command
                         ESP_LOGW(TAG, "Touch Detected at X: %d, Y: %d", x, y);
-                        if (x < 100) { ESP_LOGW(TAG, "UI Zone: LEFT (LOCK)"); servo_set_manual(180); }
-                        else if (x > 220) { ESP_LOGW(TAG, "UI Zone: RIGHT (UNLOCK)"); servo_set_manual(0); }
+                        if (x < 100) { ESP_LOGW(TAG, "UI Zone: LEFT (LOCK)"); servo_set_manual(0); }
+                        else if (x > 220) { ESP_LOGW(TAG, "UI Zone: RIGHT (UNLOCK)"); servo_set_manual(180); }
                         else { ESP_LOGW(TAG, "UI Zone: MIDDLE (SEQUENCE)"); servo_trigger_unlock_sequence(); }
                     }
                 } else if (y > 240) {
@@ -85,6 +85,7 @@ void touch_task(void *pvParameters) {
                             if (wifi_logging_enabled) {
                                 ESP_LOGW(TAG, "Diagnostic Mode: Wi-Fi WAKING UP");
                                 esp_wifi_start();
+                                esp_wifi_connect(); // CRITICAL FIX: Tell the PHY to associate with the AP
                                 display_manager_fill_screen(0x001F); // COLOR_BLUE
                             } else {
                                 ESP_LOGW(TAG, "Deployment Mode: Wi-Fi KILLED");

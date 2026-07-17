@@ -57,10 +57,33 @@ static void imu_sensor_task(void *pvParameters) {
                 imu_sample_t sample = {acc_x, acc_y, acc_z, gyro_x, gyro_y, gyro_z};
                 xQueueSend(imu_queue, &sample, 0); 
             }
+            // --- AI WAKE LOGIC (PURE ACCELEROMETER) ---
+            static int32_t base_ax = 0, base_ay = 0, base_az = 0;
+            if (base_ax == 0 && base_ay == 0 && base_az == 0) { 
+                base_ax = acc_x; base_ay = acc_y; base_az = acc_z; 
+            }
+            
+            // Calculate absolute shift from the resting baseline (catches slow rotations)
+            int32_t spatial_shift = abs(acc_x - base_ax) + abs(acc_y - base_ay) + abs(acc_z - base_az);
+            
+            // WAKE MACHINE LEARNING: ~10 degrees of smooth rotation OR a sharp frame-to-frame jerk
+            if (spatial_shift > 2000 || delta > 1500) { 
+                ml_active_frames = 150; 
+            }
+            
+            // WAKE SCREEN: High threshold for physical bumps to save battery
             if (delta > 6000) { 
                 display_manager_wake(); 
-                ml_active_frames = 150; // Wake ML for 3 seconds
             }
+            
+            // Slowly drag the baseline toward current state (Low-pass filter, ~5 second convergence)
+            // We only drag the baseline if ML is asleep, so it doesn't chase the lift!
+            if (ml_active_frames == 0) {
+                base_ax = (base_ax * 255 + acc_x) / 256;
+                base_ay = (base_ay * 255 + acc_y) / 256;
+                base_az = (base_az * 255 + acc_z) / 256;
+            }
+            // ------------------------------------------
             if (ml_active_frames > 0) ml_active_frames--;
             last_ax = acc_x; last_ay = acc_y; last_az = acc_z;
 
@@ -91,7 +114,7 @@ static void udp_batch_task(void *pvParameters) {
     struct sockaddr_in dest_addr;
     dest_addr.sin_family = AF_INET;
     dest_addr.sin_port = htons(UDP_BROADCAST_PORT);
-    dest_addr.sin_addr.s_addr = inet_addr("192.168.86.39"); 
+    dest_addr.sin_addr.s_addr = inet_addr("192.168.86.48"); 
 
     char payload_chunk[1400];
     int current_len = 0;
