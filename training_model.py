@@ -150,7 +150,7 @@ def load_and_window_data(directory):
         for i, pt in enumerate(raw_data):
             if i == 0:
                 current.append(pt); continue
-            if pt['ts'] - raw_data[i-1]['ts'] > 1000000:
+            if abs(pt['ts'] - raw_data[i-1]['ts']) > 1000000:
                 if len(current) > 50: initial_bursts.append(current)
                 current = []
             current.append(pt)
